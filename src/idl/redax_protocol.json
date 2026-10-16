@@ -1,0 +1,1376 @@
+{
+  "address": "7SGcKGsE5tRCFcWFq7jK4P3yPc2EcGiFidtS4hwJEQgd",
+  "metadata": {
+    "name": "redax_protocol",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "REDAX Phase 1 protocol program for classic SPL conversion flows"
+  },
+  "instructions": [
+    {
+      "name": "activate_campaign",
+      "discriminator": [
+        17,
+        214,
+        3,
+        27,
+        91,
+        67,
+        44,
+        171
+      ],
+      "accounts": [
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true,
+          "relations": [
+            "campaign"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "add_token_config",
+      "discriminator": [
+        138,
+        17,
+        119,
+        191,
+        118,
+        60,
+        75,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true,
+          "relations": [
+            "campaign"
+          ]
+        },
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "legacy_mint",
+          "docs": [
+            "of the Solana account owner (must equal `CLASSIC_SPL_TOKEN_PROGRAM_ID`),",
+            "data length (exactly 82 bytes), `is_initialized` flag, and decimals byte",
+            "(offset 44, via `spl_compat::classic_mint_decimals`) is performed in the",
+            "handler body per L3E-3B5A LC-A / LC-B. `legacy_mint` participates in the",
+            "`token_config` PDA derivation via `legacy_mint.key()`."
+          ]
+        },
+        {
+          "name": "output_mint",
+          "docs": [
+            "`campaign.output_mint`; manual validation of the Solana account owner",
+            "(must equal `CLASSIC_SPL_TOKEN_PROGRAM_ID`), data length (exactly 82",
+            "bytes), `is_initialized` flag, and decimals byte (offset 44, via",
+            "`spl_compat::classic_mint_decimals`) is performed in the handler body",
+            "per L3E-3B5A LC-C."
+          ]
+        },
+        {
+          "name": "token_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign"
+              },
+              {
+                "kind": "account",
+                "path": "legacy_mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "rate_numerator",
+          "type": "u128"
+        },
+        {
+          "name": "rate_denominator",
+          "type": "u128"
+        },
+        {
+          "name": "max_output_from_tc",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "convert_exact_in",
+      "discriminator": [
+        15,
+        209,
+        11,
+        216,
+        241,
+        255,
+        120,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          },
+          "relations": [
+            "token_config"
+          ]
+        },
+        {
+          "name": "token_config",
+          "writable": true
+        },
+        {
+          "name": "legacy_mint",
+          "docs": [
+            "later `Burn` decrements its supply. Validated in the handler (L3E-3B12F):",
+            "Solana account owner == `CLASSIC_SPL_TOKEN_PROGRAM_ID`, exact 82-byte",
+            "classic `Mint` layout, `is_initialized`, key == `token_config.legacy_mint`,",
+            "decimals == `token_config.legacy_decimals`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "output_mint",
+          "docs": [
+            "later `MintTo` increments its supply. Validated in the handler",
+            "(L3E-3B12F): Solana account owner == `CLASSIC_SPL_TOKEN_PROGRAM_ID`, exact",
+            "82-byte classic `Mint` layout, `is_initialized`, key == `campaign.output_mint`,",
+            "`mint_authority == Some(campaign.key())`, `freeze_authority == None`. No",
+            "metadata behavior."
+          ],
+          "writable": true
+        },
+        {
+          "name": "user_legacy_ata",
+          "docs": [
+            "because it is the source of the later `Burn`. Validated in the handler",
+            "(L3E-3B12F): Solana account owner == `CLASSIC_SPL_TOKEN_PROGRAM_ID`, exact",
+            "165-byte classic `TokenAccount` layout, `is_initialized`, `mint` field ==",
+            "`legacy_mint`, token `owner` field == `user` (owner mismatch ->",
+            "`Unauthorized`)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "user_output_ata",
+          "docs": [
+            "`mut` because the later `MintTo` credits it. It MUST already exist — no",
+            "`init`, no `init_if_needed`, no ATA creation here (`prepare_user_output_ata`",
+            "creates it; convert rejects a missing ATA per DL-009). Validated in the",
+            "handler (L3E-3B12F): address == canonical ATA for `(user,",
+            "CLASSIC_SPL_TOKEN_PROGRAM_ID, output_mint)`, account data non-empty,",
+            "Solana account owner == `CLASSIC_SPL_TOKEN_PROGRAM_ID`, exact 165-byte",
+            "classic `TokenAccount` layout, `is_initialized`, `mint` field ==",
+            "`output_mint`, token `owner` field == `user`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "protocol_fee_vault",
+          "docs": [
+            "`MintTo` credits it. Validated in the handler (L3E-3B12F): key ==",
+            "`campaign.protocol_fee_vault`, Solana account owner ==",
+            "`CLASSIC_SPL_TOKEN_PROGRAM_ID`, exact 165-byte classic `TokenAccount`",
+            "layout, `is_initialized`, `mint` field == `output_mint`, token `owner`",
+            "field == `protocol_config.protocol_fee_authority` — the Campaign PDA is",
+            "NOT its authority and never transfers out of it. No transfer/drain",
+            "behavior."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "pre-Token-2022 SPL Token program) — pinned in the handler (L3E-3B12F);",
+            "rejects Token-2022. Mirrors the `token_program` handling in",
+            "`prepare_user_output_ata`. No new dependency."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount_in",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "finalize_campaign",
+      "discriminator": [
+        241,
+        76,
+        201,
+        221,
+        33,
+        222,
+        220,
+        138
+      ],
+      "accounts": [
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true,
+          "relations": [
+            "campaign"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_campaign",
+      "discriminator": [
+        154,
+        188,
+        249,
+        244,
+        226,
+        210,
+        253,
+        109
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "output_governance",
+          "signer": true
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "output_governance"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "output_mint",
+          "docs": [
+            "the caller / setup flow before this instruction executes (DL-014) and",
+            "validated — never created — here. Manual validation of the account",
+            "owner (classic SPL Token program ID), data length (82 bytes),",
+            "is_initialized, mint_authority (must equal the exact Campaign PDA),",
+            "freeze_authority (must be None), decimals (must equal",
+            "OUTPUT_MINT_DECIMALS = 9) and supply (must be zero) is performed in the",
+            "handler body per L3E-3B3A LC-1, L3E-3B3C1 §2, and DL-015 (canonical",
+            "spec v1.4 §6)."
+          ]
+        },
+        {
+          "name": "protocol_fee_vault",
+          "docs": [
+            "protocol_fee_authority owner over the output_mint. Manual ATA",
+            "derivation (Pubkey::find_program_address against the classic SPL",
+            "Token program and the Associated Token Program), data length (165",
+            "bytes), state, mint, and owner validation are performed in the",
+            "handler body per L3E-3B3A LC-2 and L3E-3B3C1 §3/§4."
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "end_ts",
+          "type": {
+            "option": "i64"
+          }
+        },
+        {
+          "name": "max_output_supply",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "init_protocol",
+      "discriminator": [
+        3,
+        188,
+        141,
+        237,
+        225,
+        226,
+        232,
+        210
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "protocol_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "protocol_fee_authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "protocol_emergency_pause_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "pause_campaign",
+      "discriminator": [
+        62,
+        247,
+        54,
+        192,
+        240,
+        158,
+        8,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "prepare_user_output_ata",
+      "discriminator": [
+        238,
+        48,
+        109,
+        185,
+        85,
+        209,
+        62,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "campaign",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user"
+        },
+        {
+          "name": "output_mint"
+        },
+        {
+          "name": "user_output_ata",
+          "writable": true
+        },
+        {
+          "name": "associated_token_program"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "setup_metadata",
+      "discriminator": [
+        33,
+        141,
+        154,
+        228,
+        169,
+        204,
+        90,
+        181
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true,
+          "relations": [
+            "campaign"
+          ]
+        },
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "output_mint"
+        },
+        {
+          "name": "metadata_account",
+          "writable": true
+        },
+        {
+          "name": "metadata_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "symbol",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "unpause_campaign",
+      "discriminator": [
+        177,
+        111,
+        91,
+        206,
+        169,
+        242,
+        87,
+        95
+      ],
+      "accounts": [
+        {
+          "name": "campaign",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  109,
+                  112,
+                  97,
+                  105,
+                  103,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "campaign.output_governance",
+                "account": "Campaign"
+              },
+              {
+                "kind": "account",
+                "path": "campaign.salt",
+                "account": "Campaign"
+              }
+            ]
+          }
+        },
+        {
+          "name": "campaign_admin",
+          "signer": true,
+          "relations": [
+            "campaign"
+          ]
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Campaign",
+      "discriminator": [
+        50,
+        40,
+        49,
+        11,
+        157,
+        220,
+        229,
+        192
+      ]
+    },
+    {
+      "name": "ProtocolConfig",
+      "discriminator": [
+        207,
+        91,
+        250,
+        28,
+        152,
+        179,
+        215,
+        209
+      ]
+    },
+    {
+      "name": "TokenConfig",
+      "discriminator": [
+        92,
+        73,
+        255,
+        43,
+        107,
+        51,
+        117,
+        101
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Converted",
+      "discriminator": [
+        48,
+        254,
+        146,
+        135,
+        50,
+        134,
+        136,
+        167
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "ProtocolConfigNotInitialized",
+      "msg": "Protocol config account is not initialized"
+    },
+    {
+      "code": 6001,
+      "name": "CampaignNotActive",
+      "msg": "Campaign is not in Active status"
+    },
+    {
+      "code": 6002,
+      "name": "MetadataNotSet",
+      "msg": "Campaign metadata is not set"
+    },
+    {
+      "code": 6003,
+      "name": "MetadataAlreadySet",
+      "msg": "Campaign metadata is already set"
+    },
+    {
+      "code": 6004,
+      "name": "WrongCampaignStatus",
+      "msg": "Campaign is not in the expected status for this transition"
+    },
+    {
+      "code": 6005,
+      "name": "WrongTokenConfig",
+      "msg": "Provided token config does not belong to this campaign"
+    },
+    {
+      "code": 6006,
+      "name": "WrongLegacyMint",
+      "msg": "Provided legacy mint does not match the token config"
+    },
+    {
+      "code": 6007,
+      "name": "WrongOutputMint",
+      "msg": "Provided output mint does not match the campaign"
+    },
+    {
+      "code": 6008,
+      "name": "OutputMintAuthorityMismatch",
+      "msg": "Output mint authority does not match the campaign PDA"
+    },
+    {
+      "code": 6009,
+      "name": "FreezeAuthorityNotNone",
+      "msg": "Output mint freeze authority must be None"
+    },
+    {
+      "code": 6010,
+      "name": "WrongUserLegacyAta",
+      "msg": "Provided user legacy ATA does not match user and legacy mint"
+    },
+    {
+      "code": 6011,
+      "name": "WrongUserOutputAta",
+      "msg": "Provided user output ATA does not match user and output mint"
+    },
+    {
+      "code": 6012,
+      "name": "UserOutputAtaNonCanonical",
+      "msg": "User output ATA is not the canonical associated token account"
+    },
+    {
+      "code": 6013,
+      "name": "UserOutputAtaNotFound",
+      "msg": "User output ATA does not exist"
+    },
+    {
+      "code": 6014,
+      "name": "WrongProtocolFeeVault",
+      "msg": "Provided protocol fee vault does not match the campaign"
+    },
+    {
+      "code": 6015,
+      "name": "WrongProtocolFeeVaultMint",
+      "msg": "Protocol fee vault mint does not match the output mint"
+    },
+    {
+      "code": 6016,
+      "name": "WrongProtocolFeeVaultAuthority",
+      "msg": "Protocol fee vault owner is not the protocol fee authority"
+    },
+    {
+      "code": 6017,
+      "name": "AliasedAccounts",
+      "msg": "Two or more accounts that must be distinct were aliased"
+    },
+    {
+      "code": 6018,
+      "name": "WrongTokenProgram",
+      "msg": "Token program does not match the canonical SPL Token program"
+    },
+    {
+      "code": 6019,
+      "name": "Unauthorized",
+      "msg": "Caller is not authorized for this operation"
+    },
+    {
+      "code": 6020,
+      "name": "WrongMetadataProgram",
+      "msg": "Metadata program does not match the canonical Metaplex Token Metadata program"
+    },
+    {
+      "code": 6021,
+      "name": "WrongMetadataAccount",
+      "msg": "Metadata account does not match the expected derivation"
+    },
+    {
+      "code": 6022,
+      "name": "MetadataLengthOutOfBounds",
+      "msg": "Metadata name, symbol, or uri exceeds the configured length bound"
+    },
+    {
+      "code": 6023,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero"
+    },
+    {
+      "code": 6024,
+      "name": "ZeroGrossOut",
+      "msg": "Computed gross output is zero"
+    },
+    {
+      "code": 6025,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6026,
+      "name": "MathUnderflow",
+      "msg": "Arithmetic underflow"
+    },
+    {
+      "code": 6027,
+      "name": "ConversionTruncationLoss",
+      "msg": "Conversion would lose precision below configured tolerance"
+    },
+    {
+      "code": 6028,
+      "name": "InvalidRate",
+      "msg": "Configured rate is invalid"
+    },
+    {
+      "code": 6029,
+      "name": "CapExceededCampaign",
+      "msg": "Campaign cap would be exceeded by this conversion"
+    },
+    {
+      "code": 6030,
+      "name": "CapExceededTokenConfig",
+      "msg": "Token config cap would be exceeded by this conversion"
+    },
+    {
+      "code": 6031,
+      "name": "TooManyTokenConfigs",
+      "msg": "Adding this token config would exceed MAX_TOKEN_CONFIGS_PER_CAMPAIGN"
+    },
+    {
+      "code": 6032,
+      "name": "CampaignExpired",
+      "msg": "Campaign has expired"
+    },
+    {
+      "code": 6033,
+      "name": "InvalidCampaignDeadline",
+      "msg": "Invalid campaign deadline"
+    },
+    {
+      "code": 6034,
+      "name": "OutputMintDecimalsMismatch",
+      "msg": "Output mint decimals must equal 9"
+    },
+    {
+      "code": 6035,
+      "name": "OutputMintSupplyNotZero",
+      "msg": "Output mint supply must be zero"
+    }
+  ],
+  "types": [
+    {
+      "name": "Campaign",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "campaign_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "output_governance",
+            "type": "pubkey"
+          },
+          {
+            "name": "output_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "protocol_fee_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "metadata_setup",
+            "type": "bool"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "CampaignStatus"
+              }
+            }
+          },
+          {
+            "name": "discovery_status",
+            "type": "u8"
+          },
+          {
+            "name": "token_config_count",
+            "type": "u16"
+          },
+          {
+            "name": "total_output_minted",
+            "type": "u128"
+          },
+          {
+            "name": "total_protocol_fees_minted",
+            "type": "u128"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "salt",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "end_ts",
+            "type": {
+              "option": "i64"
+            }
+          },
+          {
+            "name": "max_output_supply",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CampaignStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Initialized"
+          },
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Paused"
+          },
+          {
+            "name": "Finalized"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Converted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "campaign",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_config",
+            "type": "pubkey"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "legacy_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "output_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_in",
+            "type": "u64"
+          },
+          {
+            "name": "amount_in_normalized",
+            "type": "u128"
+          },
+          {
+            "name": "normalization_remainder",
+            "type": "u128"
+          },
+          {
+            "name": "gross_out",
+            "type": "u128"
+          },
+          {
+            "name": "user_out",
+            "type": "u128"
+          },
+          {
+            "name": "fee_out",
+            "type": "u128"
+          },
+          {
+            "name": "user_output_ata",
+            "type": "pubkey"
+          },
+          {
+            "name": "protocol_fee_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "campaign_total_output_minted_after",
+            "type": "u128"
+          },
+          {
+            "name": "campaign_total_protocol_fees_minted_after",
+            "type": "u128"
+          },
+          {
+            "name": "token_config_total_output_minted_from_tc_after",
+            "type": "u128"
+          },
+          {
+            "name": "token_config_normalization_remainder_total_after",
+            "type": "u128"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "protocol_fee_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "protocol_emergency_pause_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TokenConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "campaign",
+            "type": "pubkey"
+          },
+          {
+            "name": "legacy_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "rate_numerator",
+            "type": "u128"
+          },
+          {
+            "name": "rate_denominator",
+            "type": "u128"
+          },
+          {
+            "name": "legacy_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "output_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "total_output_minted_from_tc",
+            "type": "u128"
+          },
+          {
+            "name": "normalization_remainder_total",
+            "type": "u128"
+          },
+          {
+            "name": "max_output_from_tc",
+            "type": "u128"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,2170 @@
+/* ==========================================================================
+   REDAX — Stage 0 design system (dark-first, infrastructure-grade)
+
+   Premium restraint over ornament: precise typography, tabular numerals for
+   amounts, hairline borders, calm status semantics, one clear hierarchy per
+   surface. No external fonts, no images, no brand assets — system font
+   stacks and a text wordmark only at Stage 0.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg-canvas: #0a0e15;
+  --bg-surface: #10151f;
+  --bg-raised: #141b28;
+  --bg-inset: #0c1119;
+
+  /* Lines */
+  --border: #1d2533;
+  --border-strong: #2a3548;
+
+  /* Text */
+  --text-primary: #e9eef6;
+  --text-secondary: #9aa7bb;
+  --text-muted: #66718a;
+
+  /* Accent + status */
+  --accent: #45c4ad;
+  --accent-soft: rgba(69, 196, 173, 0.12);
+  --positive: #4fbf81;
+  --positive-soft: rgba(79, 191, 129, 0.12);
+  --caution: #dcaf52;
+  --caution-soft: rgba(220, 175, 82, 0.1);
+  --info: #5f9fdd;
+  --info-soft: rgba(95, 159, 221, 0.12);
+  --neutral-soft: rgba(154, 167, 187, 0.1);
+
+  /* Type */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+    Menlo, Consolas, monospace;
+
+  /* Geometry */
+  --radius-card: 12px;
+  --radius-pill: 999px;
+  --shell-sidebar-width: 272px;
+  --content-max-width: 1080px;
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Shell layout
+   -------------------------------------------------------------------------- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--shell-sidebar-width) 1fr;
+  min-height: 100vh;
+}
+
+.shell__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 28px 20px;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.shell__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Wordmark — text only at Stage 0; the brand visual system is a later,
+   separately gated track, so no logo/icon asset exists here. */
+.wordmark {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.wordmark__name {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.wordmark__sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.nav__item:hover {
+  background: var(--bg-raised);
+}
+
+.nav__item--active {
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+}
+
+.nav__label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.nav__item--active .nav__label {
+  color: var(--accent);
+}
+
+.nav__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sidebar__foot {
+  margin-top: auto;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sidebar__foot p {
+  margin: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Top bar / environment badge
+   -------------------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.topbar__stage {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.env-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  font-size: 12px;
+}
+
+.env-badge__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.env-badge__label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.env-badge__note {
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Content / screens
+   -------------------------------------------------------------------------- */
+
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 36px 32px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.screen-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.screen-header__eyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.screen-header__title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.screen-header__lede {
+  max-width: 70ch;
+  color: var(--text-secondary);
+}
+
+.screen-header__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* Hero (home) */
+.hero {
+  padding: 44px 36px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background:
+    radial-gradient(
+      120% 140% at 85% -20%,
+      rgba(69, 196, 173, 0.1) 0%,
+      rgba(69, 196, 173, 0) 55%
+    ),
+    var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hero__eyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hero__title {
+  font-size: 38px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+  max-width: 22ch;
+}
+
+.hero__lede {
+  font-size: 16px;
+  color: var(--text-secondary);
+  max-width: 64ch;
+}
+
+.hero__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* Card grids */
+.grid {
+  display: grid;
+  gap: 16px;
+}
+
+.grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.grid--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* --------------------------------------------------------------------------
+   Cards
+   -------------------------------------------------------------------------- */
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card--warning {
+  border-color: rgba(220, 175, 82, 0.45);
+  background: linear-gradient(0deg, var(--caution-soft), var(--caution-soft)),
+    var(--bg-surface);
+}
+
+.card__eyebrow {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.card__title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+
+.card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.card__body > p {
+  margin: 0;
+}
+
+.card__footnote {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* --------------------------------------------------------------------------
+   Status pills
+   -------------------------------------------------------------------------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.pill--neutral {
+  color: var(--text-secondary);
+  background: var(--neutral-soft);
+  border-color: var(--border-strong);
+}
+
+.pill--positive {
+  color: var(--positive);
+  background: var(--positive-soft);
+  border-color: rgba(79, 191, 129, 0.35);
+}
+
+.pill--caution {
+  color: var(--caution);
+  background: var(--caution-soft);
+  border-color: rgba(220, 175, 82, 0.4);
+}
+
+.pill--info {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: rgba(95, 159, 221, 0.35);
+}
+
+.pill--accent {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(69, 196, 173, 0.35);
+}
+
+/* --------------------------------------------------------------------------
+   Metric rows (amounts use mono + tabular numerals)
+   -------------------------------------------------------------------------- */
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.metric:last-child {
+  border-bottom: none;
+}
+
+.metric__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.metric__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.metric__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.metric--emphasis .metric__label {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.metric--emphasis .metric__value {
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Checklist (token team trial)
+   -------------------------------------------------------------------------- */
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+}
+
+.checklist__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.checklist__item:last-child {
+  border-bottom: none;
+}
+
+.checklist__text {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.checklist__marker {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Lifecycle chain (admin)
+   -------------------------------------------------------------------------- */
+
+.lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.lifecycle__state {
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.lifecycle__arrow {
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Proof boundary note
+   -------------------------------------------------------------------------- */
+
+.proof-note {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg-inset);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.proof-note__title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.proof-note__body {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   Footer
+   -------------------------------------------------------------------------- */
+
+.footer {
+  border-top: 1px solid var(--border);
+  padding: 18px 32px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  width: 100%;
+}
+
+.footer p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.footer__fine {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 960px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .shell__sidebar {
+    position: static;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .grid--three,
+  .grid--two {
+    grid-template-columns: 1fr;
+  }
+
+  .hero__title {
+    font-size: 30px;
+  }
+
+  .content,
+  .footer {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  .topbar {
+    padding: 12px 20px;
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Mock dynamic directory surfaces (Home + Holder)
+
+   Drives the MOCK_LOCAL multi-project directory: status counts, filters/sorts,
+   campaign cards, cap/proof meters, holder personas, and eligibility / quote /
+   rejection panels. Reuses the Stage 0 tokens above — no new palette, no
+   images, no brand assets.
+   -------------------------------------------------------------------------- */
+
+/* Top-bar badges: data-source (mock) badge alongside the environment badge */
+.topbar__badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.mock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid rgba(220, 175, 82, 0.4);
+  border-radius: var(--radius-pill);
+  background: var(--caution-soft);
+  font-size: 12px;
+}
+
+.mock-badge__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--caution);
+}
+
+.mock-badge__label {
+  font-family: var(--font-mono);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.mock-badge__note {
+  color: var(--text-muted);
+}
+
+/* Wallet-status badge (DEVNET_WALLET_READONLY chrome slot only). Additive:
+   when App passes no wallet slot, nothing here applies and the top bar renders
+   exactly as before. Read-only wallet context — the control never renders a
+   transaction action. */
+.wallet-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  font-size: 12px;
+}
+
+.wallet-badge__label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.wallet-badge__name {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.wallet-badge__key {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.wallet-badge__note {
+  color: var(--text-muted);
+}
+
+.wallet-badge__list {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wallet-badge__btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: 12px;
+  color: var(--text-primary);
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.wallet-badge__btn:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
+.wallet-badge__btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.wallet-badge__error {
+  color: var(--caution);
+}
+
+/* Matched read-only role chips (DEVNET_WALLET_READONLY connected wallet). Address
+   match against on-chain authorities only — no capability, no transaction. */
+.wallet-badge__roles {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wallet-badge__role {
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+}
+
+/* Compact caption line inside a card body */
+.note-line {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* Status count grid */
+.count-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.count {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.count__num {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.count__label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Filter / sort toolbar */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px 24px;
+}
+
+.toolbar__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.toolbar__label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.seg__btn {
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.seg__btn:hover {
+  background: var(--bg-raised);
+}
+
+.seg__btn--active {
+  background: var(--bg-raised);
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+/* Campaign directory grid + card */
+.campaign-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(264px, 1fr));
+  gap: 14px;
+}
+
+.campaign-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.campaign-card:hover {
+  background: var(--bg-raised);
+}
+
+.campaign-card--active {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.campaign-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.campaign-card__id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.campaign-card__name {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.campaign-card__symbol {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.campaign-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.campaign-card__window {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+/* Meters (cap utilization / proof completeness) */
+.meters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.meter__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.meter__label {
+  color: var(--text-muted);
+}
+
+.meter__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.meter__track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.meter__fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+}
+
+.meter__fill--accent {
+  background: var(--accent);
+}
+
+.meter__fill--caution {
+  background: var(--caution);
+}
+
+.meter__fill--positive {
+  background: var(--positive);
+}
+
+/* Selected-migration summary head */
+.summary__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Holder persona chips + meta */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.chip:hover {
+  background: var(--bg-raised);
+}
+
+.chip--active {
+  color: var(--accent);
+  border-color: rgba(69, 196, 173, 0.55);
+  background: var(--accent-soft);
+}
+
+.holder-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.holder-meta__addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Eligibility / rejection panels */
+.eligibility-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.reason {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--caution);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.reason__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reason__label {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.reason__detail {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.reason__code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Mock dynamic Team / Admin / Observer surfaces
+
+   Accepted-input config cards (shared by the team + admin surfaces), the admin
+   campaign list, and the observer receipt list. Reuses the Stage 0 tokens above
+   — no new palette, no images, no brand assets.
+   -------------------------------------------------------------------------- */
+
+/* Accepted-input config cards (token team + admin) */
+.config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.config-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.config-card__title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.config-card__pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.config-card__id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* Admin campaign list */
+.admin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.admin-row:hover {
+  background: var(--bg-raised);
+}
+
+.admin-row--active {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.admin-row__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-row__title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.admin-row__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 16px;
+}
+
+.admin-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.admin-fact__label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.admin-fact__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.admin-row__vault {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* Observer receipt list */
+.receipt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.receipt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.receipt-item:hover {
+  background: var(--bg-raised);
+}
+
+.receipt-item--active {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.receipt-item__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.receipt-item__title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.receipt-item__sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.receipt-item__id {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   Holder "prepare output token account" panel (DEVNET_TX_ENABLED only)
+
+   The single wallet-approved surface: connect a wallet, read output-ATA status,
+   preview, and prepare. Reuses the Stage 0 tokens above — no new palette, no
+   images, no external assets, and no hidden inputs.
+   -------------------------------------------------------------------------- */
+
+.prepare-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+}
+
+.prepare-panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prepare-panel__eyebrow {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.prepare-panel__title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+}
+
+.prepare-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.prepare-panel__wallets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prepare-panel__btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.prepare-panel__btn:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
+.prepare-panel__btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.prepare-panel__error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--caution);
+}
+
+.prepare-panel__identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.prepare-panel__idlabel {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.prepare-panel__idkey {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.prepare-panel__status {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.prepare-panel__status .note-line {
+  flex: 1;
+  min-width: 220px;
+}
+
+.prepare-panel__action {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.prepare-panel__warn {
+  margin: 0;
+  font-size: 13px;
+  color: var(--caution);
+}
+
+.prepare-panel__cta {
+  align-self: flex-start;
+  padding: 9px 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(69, 196, 173, 0.55);
+  background: var(--accent-soft);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--accent);
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.prepare-panel__cta:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
+.prepare-panel__cta:disabled {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  background: var(--bg-inset);
+  cursor: not-allowed;
+}
+
+.prepare-panel__boundary {
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Holder conversion PREVIEW panel (DEVNET_TX_ENABLED only; preview-only)
+
+   A distinct, informational sibling to the prepare panel: it previews a
+   conversion outcome and the pre-burn checks, but signs nothing and shows no
+   convert control. Info-toned left border so it never reads as an action CTA.
+   Reuses the Stage 0 tokens above — no new palette, no images, no assets.
+   -------------------------------------------------------------------------- */
+
+.convert-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+}
+
+.convert-panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.convert-panel__eyebrow {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.convert-panel__title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+}
+
+.convert-panel__intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.convert-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.convert-panel__action {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.convert-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.convert-panel__fieldlabel {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.convert-panel__inputrow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.convert-panel__input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  transition: border-color 160ms ease;
+}
+
+.convert-panel__input:focus {
+  outline: none;
+  border-color: var(--info);
+}
+
+.convert-panel__input::placeholder {
+  color: var(--text-muted);
+}
+
+.convert-panel__max {
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.convert-panel__max:hover {
+  border-color: var(--info);
+  color: var(--text-primary);
+}
+
+.convert-panel__balance {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.convert-panel__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.convert-panel__hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.convert-panel__hint--warn {
+  color: var(--caution);
+}
+
+.convert-panel__blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.convert-panel__block {
+  margin: 0;
+  font-size: 13px;
+  color: var(--caution);
+}
+
+.convert-panel__warn {
+  margin: 0;
+  font-size: 13px;
+  color: var(--caution);
+}
+
+.convert-panel__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.convert-panel__boundary {
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Holder conversion ACTION (DEVNET_TX_ENABLED; wallet-approved convert)
+
+   The explicit convert step inside the convert panel: an unchecked-by-default
+   acknowledgement, a gated convert button, and the in-flight / terminal action
+   status. Reuses the Stage 0 tokens — no new palette, no images, no assets. The
+   success state is a measured positive (soft tint + tone border), deliberately
+   distinct from any launch / readiness success banner.
+   -------------------------------------------------------------------------- */
+
+.convert-panel__actionblock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.convert-panel__ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.convert-panel__ackbox {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.convert-panel__acktext {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.convert-panel__ackhelp {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.convert-panel__cta {
+  align-self: flex-start;
+  padding: 9px 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(69, 196, 173, 0.55);
+  background: var(--accent-soft);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--accent);
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.convert-panel__cta:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
+.convert-panel__cta:disabled {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  background: var(--bg-inset);
+  cursor: not-allowed;
+}
+
+.convert-panel__disabledreason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--caution);
+}
+
+.convert-panel__actionboundary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.convert-panel__status {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.convert-panel__status .note-line {
+  flex: 1;
+  min-width: 220px;
+  margin: 0;
+}
+
+.convert-panel__status--info {
+  border-left-color: var(--info);
+  background: var(--info-soft);
+}
+
+.convert-panel__status--positive {
+  border-left-color: var(--positive);
+  background: var(--positive-soft);
+}
+
+.convert-panel__status--caution {
+  border-left-color: var(--caution);
+  background: var(--caution-soft);
+}
+
+.convert-panel__proofnote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.convert-panel__reset {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.convert-panel__reset:hover {
+  border-color: var(--info);
+  color: var(--text-primary);
+}
+
+/* Tier 1 single-transaction receipt card (Holder success terminal). */
+.convert-panel__receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--positive);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.convert-panel__receipthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.convert-panel__receipteyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.convert-panel__receipttitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.convert-panel__receipthint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.convert-panel__receipthint--warn {
+  color: var(--caution);
+}
+
+.convert-panel__receiptboundary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Team / admin wizard preview (static; no transaction path)
+
+   A read-only step model rendered inside a standard surface card. Numbered
+   steps, an eventual-input inventory, per-step checks, and a disabled
+   transaction state. No control, no focus ring, no interactive affordance —
+   nothing here is clickable, so nothing is styled as if it were.
+   -------------------------------------------------------------------------- */
+
+.wizard-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.wizard-preview__header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-preview__intro {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__boundary {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__draftnotice {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.wizard-preview__steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wizard-preview__step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.wizard-preview__stephead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.wizard-preview__stepindex {
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.wizard-preview__steptitle {
+  flex: 1 1 auto;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wizard-preview__purpose {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__subtitle {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.wizard-preview__fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wizard-preview__field {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: 4px 16px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-preview__field:last-child {
+  border-bottom: none;
+}
+
+.wizard-preview__fieldname {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.wizard-preview__fieldbody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* A plain draft input: no affordance that could read as a submit control. */
+.wizard-preview__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  transition: border-color 160ms ease;
+}
+
+.wizard-preview__input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.wizard-preview__fieldnote {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.wizard-preview__fieldwarning {
+  margin: 0;
+  font-size: 12px;
+  color: var(--caution);
+}
+
+.wizard-preview__fieldhint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* A program-derived row. It aligns with the field rows above it but carries no
+   control: no input, no focus ring, no pointer cursor, no hover state. Nothing
+   in it is interactive, so nothing in it is styled as if it were. */
+.wizard-preview__derivedrow {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: 4px 16px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-preview__derivedrow:last-child {
+  border-bottom: none;
+}
+
+.wizard-preview__derivedtitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wizard-preview__derivednote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.wizard-preview__checks {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__warning {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--caution);
+  border-radius: 8px;
+  background: var(--caution-soft);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.wizard-preview__stepfoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.wizard-preview__badge {
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__state {
+  flex: 1 1 220px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.wizard-preview__policy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-preview__policylist {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wizard-preview__claims {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .wizard-preview__field,
+  .wizard-preview__derivedrow {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* Team/Admin connected-wallet role diagnosis — read-only display.
+   Deliberately free of any action affordance: no button, no pointer cursor, no
+   hover state. Matched-authority chips are neutral rather than accented, and no
+   arm uses the caution tone, because matching no authority is ordinary
+   information rather than a warning. */
+.team-role-diagnosis {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.team-role-diagnosis__status {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.team-role-diagnosis__header {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.team-role-diagnosis__roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-role-diagnosis__role {
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+}
+
+.team-role-diagnosis__boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.team-role-diagnosis__note {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
