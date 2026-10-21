@@ -1614,7 +1614,7 @@ export const TEAM_ADMIN_ADD_TOKEN_CONFIG: TeamAdminAddTokenConfigCopy = {
   intro:
     'The supply-side step after a campaign exists: one accepted classic-SPL input, with its own conversion rate and its own output cap, added to the campaign you selected. Each row is one devnet transaction, and it runs only when you click Submit this token config and approve it in the approved Team wallet.',
   boundary:
-    'Devnet only, and one campaign at a time. A token config’s terms are fixed once the account exists, so a rate or a cap is never edited afterwards. Applying metadata is a separate step on its own surface, which this one neither performs nor offers; activating a campaign, pausing, unpausing and finalizing are separate steps that no surface here performs. Nothing here is a mainnet, production, audit or readiness claim.',
+    'Devnet only, and one campaign at a time. A token config’s terms are fixed once the account exists, so a rate or a cap is never edited afterwards. Applying metadata, activating a campaign, pausing, unpausing and finalizing are separate steps on their own surfaces, which this one neither performs nor offers. Nothing here is a mainnet, production, audit or readiness claim.',
   authorityTitle: 'Selected campaign',
   authority: {
     EXPLICIT_SELECTION_CONFIRMED:
@@ -2172,7 +2172,7 @@ export const TEAM_ADMIN_SETUP_METADATA: TeamAdminSetupMetadataCopy = {
   intro:
     'The naming step for a campaign that already exists: one name, one symbol and one approved location, written once to the output token’s metadata account. You review it locally first, then set it — and it runs only when you click Set immutable metadata and approve it in the approved Team wallet.',
   boundary:
-    'Devnet only, and one campaign at a time. This step is single-shot: Phase 1 has no metadata-update instruction, so what is written here is what the token carries for good. Adding accepted input token configs is a separate surface; activating a campaign, pausing, unpausing and finalizing are separate steps that no surface here performs. Nothing here is a mainnet, production, audit or readiness claim.',
+    'Devnet only, and one campaign at a time. This step is single-shot: Phase 1 has no metadata-update instruction, so what is written here is what the token carries for good. Adding accepted input token configs, activating a campaign, pausing, unpausing and finalizing are separate steps on their own surfaces, which this one neither performs nor offers. Nothing here is a mainnet, production, audit or readiness claim.',
   authorityTitle: 'Selected campaign',
   authority: {
     EXPLICIT_SELECTION_CONFIRMED:
@@ -2547,7 +2547,7 @@ export const TEAM_ADMIN_ACTIVATE_CAMPAIGN: TeamAdminActivateCampaignCopy = {
   intro:
     'The step that opens a campaign to holder conversions. You review the exact setup first, then activate it — and it runs only when you click Activate campaign and approve it in the approved Team wallet. It is one-way.',
   boundary:
-    'Devnet only, and one campaign at a time. Adding accepted input token configs and naming the output token are separate surfaces, and both of them close when this step succeeds. Pausing, unpausing and finalizing a campaign are separate steps that no surface here performs. Nothing here is a mainnet, production, audit or readiness claim.',
+    'Devnet only, and one campaign at a time. Adding accepted input token configs and naming the output token are separate surfaces, and both of them close when this step succeeds. Pausing, unpausing and finalizing a campaign are separate steps on their own surface, which this one neither performs nor offers. Nothing here is a mainnet, production, audit or readiness claim.',
   authorityTitle: 'Selected campaign',
   authority: {
     EXPLICIT_SELECTION_CONFIRMED:
@@ -2741,8 +2741,8 @@ export const TEAM_ADMIN_ACTIVATE_CAMPAIGN: TeamAdminActivateCampaignCopy = {
     'source implementation is not live execution — a visible control is never evidence that any particular attempt reached devnet',
     'no wallet approval is proven, no broadcast is proven, and no campaign activation is proven by this surface existing',
     'not a mainnet, production or public-product step, and not an audit or readiness claim of any kind',
-    'this is not live activation available now, and it is not an investor-ready or production-ready claim',
-    'neither Campaign A nor Campaign B is authorized, and the funding lane is not closed',
+    'activation runs on devnet only, and only when you click Activate campaign and approve it in the approved Team wallet — it is not an investor-ready or production-ready claim',
+    'activating a campaign does not list it in the public directory, and it is not REDAX review, verification or endorsement',
     'a campaign that reads as active, paused or finalized is not evidence that this product activated it',
     'a transaction that landed and failed proves no effect and no cause — it is never reported as an expired campaign',
     'not a claim about any wallet other than the one that approved it',
@@ -3139,8 +3139,8 @@ export const TEAM_ADMIN_CAMPAIGN_LIFECYCLE: TeamAdminCampaignLifecycleCopy = {
     'source implementation is not live execution — a visible control is never evidence that any particular attempt reached devnet',
     'no lifecycle wallet approval is proven, no lifecycle broadcast is proven, and no lifecycle transaction is proven to have landed by this surface existing',
     'not a mainnet, production or public-product step, and not an audit or readiness claim of any kind',
-    'this is not live pause, unpause or finalize available now, and it is not an investor-ready or production-ready claim',
-    'neither Campaign A nor Campaign B is authorized, and the funding lane is not closed',
+    'pause, unpause and finalize run on devnet only, and each only when you click it and approve it in the approved Team wallet — it is not an investor-ready or production-ready claim',
+    'changing a campaign’s lifecycle state does not list it in the public directory, and it is not REDAX review, verification or endorsement',
     'a campaign that reads as paused, active or finalized is not evidence that this product put it there',
     'a transaction that landed and failed proves no effect and no cause — no program error is named for it',
     'not a claim about any wallet other than the one that approved it',
