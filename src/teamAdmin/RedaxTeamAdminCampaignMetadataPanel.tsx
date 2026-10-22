@@ -77,8 +77,17 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { MetricRow } from '../components/MetricRow'
 import { StatusPill } from '../components/StatusPill'
+import { formatRedaxRawAmount } from '../lib/redaxHumanUnits'
+import {
+  redaxAvailableMetadataPresets,
+  REDAX_METADATA_PRESETS,
+} from '../lib/redaxMetadataPresets'
+import type { RedaxMetadataPreset, RedaxPlannedMetadata } from '../lib/redaxMetadataPresets'
+import type { RedaxTeamAdminMutationSolEstimate } from './RedaxTeamAdminMutationActions'
 import { SurfaceCard } from '../components/SurfaceCard'
 import {
+  TEAM_ADMIN_AUTHORITY_LABELS,
+  teamAdminMutationResultLabel,
   TEAM_ADMIN_SETUP_METADATA,
   TEAM_ADMIN_SOL_PREFLIGHT_INSUFFICIENT,
   TEAM_ADMIN_SOL_PREFLIGHT_READING,
@@ -88,6 +97,12 @@ import {
 import type { TeamAdminSetupMetadataFieldId } from '../lib/productCopy'
 import { useRedaxWallet } from '../wallet/RedaxWalletProvider'
 import type { RedaxCampaignView } from '../data/redaxViewModels'
+import {
+  isRedaxTeamAdminVerifiedResolutionCode,
+  runRedaxTeamAdminStatusGestureSerialized,
+  useRedaxTeamAdminWorkspaceCheck,
+} from './redaxTeamAdminWorkspaceRefresh'
+import type { RedaxTeamAdminWorkspaceCheckRequest } from './redaxTeamAdminWorkspaceRefresh'
 import { useRedaxTeamAdminMutationActions } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationSolPreflightResult } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationOperation } from './redaxTeamAdminMutationIdentity'
@@ -124,6 +139,7 @@ import {
   describeRedaxTeamAdminMutationStatusReadCode,
   describeRedaxTeamAdminMutationSubmitCode,
   runRedaxTeamAdminSetupStatusGesture,
+  runRedaxTeamAdminSetupWorkspaceReadOnlyCheck,
   selectRedaxTeamAdminSetupChainTruth,
 } from './RedaxTeamAdminCampaignSetupPanel'
 import type {
@@ -135,6 +151,23 @@ import type {
 type MetadataPanelOperation = 'review' | 'submit' | 'status'
 
 export interface RedaxTeamAdminCampaignMetadataPanelProps {
+  /**
+   * The name, symbol and location planned when THIS campaign was created in this browser
+   * session, if any — a PREFILL offered by an explicit button, never a chain record and
+   * never a review. App passes it only for the campaign it was planned for.
+   */
+  readonly plannedMetadata?: RedaxPlannedMetadata | null
+  /**
+   * A workspace-wide check request (demo customer flow, 2026-10-22). When its sequence is
+   * new and it names this panel's selected campaign, this panel runs its OWN existing
+   * status gesture once — serialized with the other panels. Optional; absent means never.
+   */
+  readonly workspaceCheck?: RedaxTeamAdminWorkspaceCheckRequest | null
+  /**
+   * Told the campaign id after THIS panel saw a mutation VERIFIED and RESOLVED just now, so
+   * the workspace can refresh the dependent panels once. Never called for any other result.
+   */
+  readonly onVerifiedChainChange?: (campaignId: string) => void
   /**
    * The ONE canonical approved Team wallet, resolved once in App.
    *
@@ -336,6 +369,9 @@ export function RedaxTeamAdminCampaignMetadataPanel({
   readFreshCampaignSetupTruth,
   selectedCampaign,
   selectedCampaignId,
+  workspaceCheck = null,
+  onVerifiedChainChange,
+  plannedMetadata = null,
 }: RedaxTeamAdminCampaignMetadataPanelProps) {
   const actions = useRedaxTeamAdminMutationActions()
   const wallet = useRedaxWallet()
@@ -343,8 +379,27 @@ export function RedaxTeamAdminCampaignMetadataPanel({
   // MEMORY ONLY, all of it, and nowhere else. No storage port, no lock, no fourth owner.
   // A reload discards the draft and the approval; what survives is the durable attempt
   // and whatever the chain holds, and both are read back rather than remembered.
-  const [draft, setDraft] = useState<RedaxTeamAdminMetadataDraft>(() =>
-    emptyRedaxTeamAdminMetadataDraft(metadataUriAllowlist, 0),
+  //
+  // AND PER CAMPAIGN. The panel stays mounted while the selection moves, so the draft is kept
+  // per explicitly selected campaign: campaign B starts from the EMPTY draft below instead of
+  // inheriting A's name, symbol or location, and A's draft is where it was on the way back.
+  // Every campaign's draft starts empty; nothing is seeded from a campaign, a plan or a wizard.
+  const [draftsByCampaign, setDraftsByCampaign] = useState<
+    Readonly<Record<string, RedaxTeamAdminMetadataDraft>>
+  >({})
+  const emptyDraft = useMemo(
+    () => emptyRedaxTeamAdminMetadataDraft(metadataUriAllowlist, 0),
+    [metadataUriAllowlist],
+  )
+  const draft = draftsByCampaign[selectedCampaignId] ?? emptyDraft
+  const setDraft = useCallback(
+    (update: (current: RedaxTeamAdminMetadataDraft) => RedaxTeamAdminMetadataDraft): void => {
+      setDraftsByCampaign((all) => ({
+        ...all,
+        [selectedCampaignId]: update(all[selectedCampaignId] ?? emptyDraft),
+      }))
+    },
+    [emptyDraft, selectedCampaignId],
   )
   const [snapshot, setSnapshot] = useState<RedaxTeamAdminMetadataApprovalSnapshot | null>(null)
   const [reviewRefusal, setReviewRefusal] = useState<RedaxTeamAdminMetadataRefusalCode | null>(
@@ -412,6 +467,8 @@ export function RedaxTeamAdminCampaignMetadataPanel({
   // wrapper, the automatic effect would re-run, set state and schedule itself again — an
   // unbounded render loop issuing unbounded balance and rent reads at a live endpoint.
   const readMutationSolPreflightRef = useRef(actions.readMutationSolPreflight)
+  // The display-only estimate member, held the same way and for the same reason.
+  const readMutationSolEstimateRef = useRef(actions.readMutationSolEstimate)
 
   useEffect(() => {
     solPreflightMountedRef.current = true
@@ -426,6 +483,9 @@ export function RedaxTeamAdminCampaignMetadataPanel({
   useLayoutEffect(() => {
     readMutationSolPreflightRef.current = actions.readMutationSolPreflight
   }, [actions.readMutationSolPreflight])
+  useLayoutEffect(() => {
+    readMutationSolEstimateRef.current = actions.readMutationSolEstimate
+  }, [actions.readMutationSolEstimate])
 
   // --- C1 devnet SOL availability for SETUP_METADATA ------------------------------
   //
@@ -463,6 +523,12 @@ export function RedaxTeamAdminCampaignMetadataPanel({
       metadataSolPreflightActionable ? METADATA_SOL_PREFLIGHT_READING : METADATA_SOL_PREFLIGHT_IDLE,
     ),
   )
+
+  // The DISPLAY estimate, scoped exactly like the verdict so a previous wallet's balance is
+  // never shown beside a new one.
+  const [metadataSolEstimate, setMetadataSolEstimate] = useState<
+    MetadataScopedState<RedaxTeamAdminMutationSolEstimate | null>
+  >(() => metadataScopedState(metadataSolPreflightScope, null))
 
   // RENDER-TIME IDENTITY GATING. The projection collapses to its neutral resting value the
   // moment the identity that produced it stops being current — in THIS render, not in a later
@@ -509,6 +575,12 @@ export function RedaxTeamAdminCampaignMetadataPanel({
         setMetadataSolPreflightRecord(
           metadataScopedState<MetadataSolPreflightState>(scopeKey, { kind: 'settled', result }),
         )
+        // THE DISPLAYED ESTIMATE — the same observer, read again only to SHOW the person the
+        // estimated requirement and the observed balance. It gates nothing.
+        const estimate = await readMutationSolEstimateRef.current('SETUP_METADATA')
+        if (isMetadataSolPreflightCurrent(scopeKey, generation)) {
+          setMetadataSolEstimate(metadataScopedState(scopeKey, estimate))
+        }
       } catch {
         // A REJECTED read is not an observation. It settles as READ_UNAVAILABLE — which
         // WITHHOLDS the action — rather than as an unhandled rejection or an optimistic
@@ -541,6 +613,14 @@ export function RedaxTeamAdminCampaignMetadataPanel({
   // KNOWN-SUFFICIENT ONLY. A reading, an idle projection and a failed read all resolve to
   // false, because an unknown balance must WITHHOLD an action rather than allow one.
   const metadataSolPreflightSufficient = metadataSolPreflight.kind === 'settled' && metadataSolPreflight.result === 'SUFFICIENT'
+
+  const metadataSolEstimateValue = metadataSolEstimate.scope === metadataSolPreflightScope ? metadataSolEstimate.value : null
+  const metadataSolEstimateLine: string | null =
+    metadataSolEstimateValue === null ||
+    metadataSolEstimateValue.requiredLamports === null ||
+    metadataSolEstimateValue.availableLamports === null
+      ? null
+      : `Estimated cost of setting metadata: about ${formatRedaxRawAmount(BigInt(metadataSolEstimateValue.requiredLamports), 9)} SOL (rent, network fee bound and the Metaplex create fee — an estimate, not an exact charge). Team wallet balance: ${formatRedaxRawAmount(BigInt(metadataSolEstimateValue.availableLamports), 9)} SOL.`
 
   const metadataSolPreflightNote: string | null =
     metadataSolPreflight.kind === 'reading'
@@ -667,11 +747,44 @@ export function RedaxTeamAdminCampaignMetadataPanel({
       setSnapshot(null)
       setDraft((current) => reduceRedaxTeamAdminMetadataDraft(current, action, metadataUriAllowlist))
     },
-    [busy, metadataUriAllowlist],
+    [busy, metadataUriAllowlist, setDraft],
   )
 
+  /**
+   * Fill name, symbol and location from one ready-made (or planned) identity. Three ordinary
+   * draft edits — so the approval is dropped exactly as for any other edit, and the person
+   * still reviews before anything can be set.
+   */
+  const applyIdentity = useCallback(
+    (identity: { readonly name: string; readonly symbol: string; readonly uri: string }): void => {
+      const index = metadataUriAllowlist.indexOf(identity.uri)
+      if (index < 0) {
+        return
+      }
+      updateDraft({ kind: 'name', value: identity.name })
+      updateDraft({ kind: 'symbol', value: identity.symbol })
+      updateDraft({ kind: 'uri', index })
+    },
+    [metadataUriAllowlist, updateDraft],
+  )
+  const availablePresets = redaxAvailableMetadataPresets(metadataUriAllowlist)
+  // THE A/B PAIRING GUARD. A location that belongs to a ready-made identity may only be set
+  // with THAT identity's exact name and symbol — "A's document with B's name" is refused
+  // before review. A location outside the table is not constrained here.
+  const presetForSelectedUri: RedaxMetadataPreset | null =
+    selectedUri === null ? null : REDAX_METADATA_PRESETS.find((preset) => preset.uri === selectedUri) ?? null
+  const presetConsistent =
+    presetForSelectedUri === null ||
+    (draft.name === presetForSelectedUri.name && draft.symbol === presetForSelectedUri.symbol)
+  const plannedUsable =
+    plannedMetadata !== null && metadataUriAllowlist.includes(plannedMetadata.uri)
+
   const reviewEnabled =
-    disposition.reviewAdmissible && approvalContext !== null && selectedUri !== null && !busy
+    disposition.reviewAdmissible &&
+    approvalContext !== null &&
+    selectedUri !== null &&
+    presetConsistent &&
+    !busy
 
   const setEnabled =
     disposition.setAdmissible &&
@@ -779,6 +892,9 @@ export function RedaxTeamAdminCampaignMetadataPanel({
         metadataUri: values.metadataUri,
       })
       setSubmitResult(result)
+      if (isRedaxTeamAdminVerifiedResolutionCode(result.code)) {
+        onVerifiedChainChange?.(selectedCampaignId)
+      }
       // A READ, never a reconcile. The next state has to come from the durable record
       // rather than from what this handler happens to remember.
       setStatusResult(await actions.readMutationStatus())
@@ -814,15 +930,20 @@ export function RedaxTeamAdminCampaignMetadataPanel({
     setOperation('status')
     setFreshChainTruth(null)
     try {
-      const outcome = await runRedaxTeamAdminSetupStatusGesture(
-        {
-          reconcileMutation: () => actions.reconcileMutation(),
-          readMutationStatus: () => actions.readMutationStatus(),
-          readFreshCampaignSetupTruth,
-        },
-        gestureCampaignId,
+      const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+        runRedaxTeamAdminSetupStatusGesture(
+          {
+            reconcileMutation: () => actions.reconcileMutation(),
+            readMutationStatus: () => actions.readMutationStatus(),
+            readFreshCampaignSetupTruth,
+          },
+          gestureCampaignId,
+        ),
       )
       setReconcileCode(outcome.reconcileCode)
+      if (isRedaxTeamAdminVerifiedResolutionCode(outcome.reconcileCode)) {
+        onVerifiedChainChange?.(gestureCampaignId)
+      }
       setStatusResult(outcome.status)
       // Written WITH its campaign. A late arrival for a superseded selection is discarded
       // on every render by the same rule that discards a stale one.
@@ -832,6 +953,43 @@ export function RedaxTeamAdminCampaignMetadataPanel({
       setOperation(null)
     }
   }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
+
+  // THE ONE BOUNDED WORKSPACE TRIGGER — READ-ONLY. It runs for the newest workspace check of
+  // this campaign once the panel is free; never on a timer, never on mount, never for another
+  // campaign, and it never reconciles — that stays the click above. It claims the panel's latch
+  // synchronously and answers whether a read actually STARTED, so a request that met a busy
+  // panel stays pending in the hook instead of being lost.
+  const handleWorkspaceReadOnlyCheck = useCallback((): boolean => {
+    if (inFlightRef.current !== null) {
+      return false
+    }
+    const gestureCampaignId = selectedCampaignId
+    inFlightRef.current = 'status'
+    setOperation('status')
+    setFreshChainTruth(null)
+    void (async (): Promise<void> => {
+      try {
+        const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+          runRedaxTeamAdminSetupWorkspaceReadOnlyCheck(
+            {
+              readMutationStatus: () => actions.readMutationStatus(),
+              readFreshCampaignSetupTruth,
+            },
+            gestureCampaignId,
+          ),
+        )
+        setStatusResult(outcome.status)
+        setFreshChainTruth(outcome.freshChainTruth)
+      } catch {
+        // A read that throws leaves the cleared display; the explicit status check remains.
+      } finally {
+        inFlightRef.current = null
+        setOperation(null)
+      }
+    })()
+    return true
+  }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
+  useRedaxTeamAdminWorkspaceCheck(workspaceCheck, selectedCampaignId, busy, handleWorkspaceReadOnlyCheck)
 
   const identityNote =
     walletStatus === 'CARRIER_UNAVAILABLE'
@@ -891,7 +1049,7 @@ export function RedaxTeamAdminCampaignMetadataPanel({
           <p className="wizard-preview__header">{TEAM_ADMIN_SETUP_METADATA.authorityTitle}</p>
           <div className="wizard-preview__stephead">
             <StatusPill
-              label={campaignAuthority}
+              label={TEAM_ADMIN_AUTHORITY_LABELS[campaignAuthority] ?? campaignAuthority}
               tone={authorityConfirmed ? 'positive' : 'neutral'}
             />
           </div>
@@ -1036,6 +1194,47 @@ export function RedaxTeamAdminCampaignMetadataPanel({
           )}
         </div>
 
+        {availablePresets.length > 0 || plannedUsable ? (
+          <div className="wizard-preview__step">
+            <p className="wizard-preview__header">Ready-made token identity</p>
+            <p className="wizard-preview__fieldnote">
+              Choosing one fills the name, symbol and location together, consistently. It is still only a draft: you review the permanent values below before anything is set.
+            </p>
+            {plannedUsable && plannedMetadata !== null ? (
+              <button
+                className="wallet-badge__btn"
+                disabled={busy}
+                onClick={() => {
+                  applyIdentity(plannedMetadata)
+                }}
+                type="button"
+              >
+                {`Use the details planned at creation: ${plannedMetadata.name} (${plannedMetadata.symbol})`}
+              </button>
+            ) : null}
+            {availablePresets.map((preset) => (
+              <button
+                className="wallet-badge__btn"
+                disabled={busy}
+                key={preset.key}
+                onClick={() => {
+                  applyIdentity(preset)
+                }}
+                type="button"
+              >
+                {`Use ${preset.label} (${preset.symbol})`}
+              </button>
+            ))}
+            {presetForSelectedUri !== null ? (
+              <p className={presetConsistent ? 'wizard-preview__fieldhint' : 'wizard-preview__fieldwarning'}>
+                {presetConsistent
+                  ? `Matches the ready-made identity ${presetForSelectedUri.label}. The document's SHA-256 is part of its file name (${presetForSelectedUri.documentSha256.slice(0, 12)}…); this app does not download it — the REDAX operator verifies the published files.`
+                  : `The chosen location belongs to ${presetForSelectedUri.label}, whose name is “${presetForSelectedUri.name}” and symbol “${presetForSelectedUri.symbol}”. Use that identity's exact name and symbol, or choose another location.`}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="wizard-preview__step">
           <p className="wizard-preview__header">{TEAM_ADMIN_SETUP_METADATA.draftTitle}</p>
           <p className="wizard-preview__draftnotice">{TEAM_ADMIN_SETUP_METADATA.draftNotice}</p>
@@ -1053,7 +1252,9 @@ export function RedaxTeamAdminCampaignMetadataPanel({
                     id={inputId}
                     inputMode="text"
                     onChange={(event) => {
-                      updateDraft(metadataDraftActionFor(field.id, event.target.value))
+                      updateDraft(
+                        metadataDraftActionFor(field.id, (event.target as unknown as { readonly value: string }).value),
+                      )
                     }}
                     type="text"
                     value={draft[field.id]}
@@ -1173,6 +1374,9 @@ export function RedaxTeamAdminCampaignMetadataPanel({
           The button is READ-ONLY and is NOT a mutation transaction action: this panel's
           transaction-control count is unchanged by it.
         */}
+        {metadataSolEstimateLine !== null ? (
+          <p className="wizard-preview__fieldnote">{metadataSolEstimateLine}</p>
+        ) : null}
         {metadataSolPreflightNote !== null ? (
           <div className="wizard-preview__policy">
             <p className="wizard-preview__fieldnote">{metadataSolPreflightNote}</p>
@@ -1271,12 +1475,18 @@ export function RedaxTeamAdminCampaignMetadataPanel({
             <p className="wizard-preview__header">{TEAM_ADMIN_SETUP_METADATA.resultTitle}</p>
             <div className="wizard-preview__stephead">
               <StatusPill
-                label={
-                  submitResult.busy
-                    ? 'ANOTHER_TEAM_ADMIN_MUTATION_IS_RUNNING'
-                    : submitResult.code
+                label={teamAdminMutationResultLabel(
+                  submitResult.code,
+                  submitResult.busy,
+                  submitResult.rawBroadcastCount,
+                )}
+                tone={
+                  isRedaxTeamAdminVerifiedResolutionCode(submitResult.code)
+                    ? 'positive'
+                    : submitResult.rawBroadcastCount === 1
+                      ? 'caution'
+                      : 'neutral'
                 }
-                tone={submitResult.rawBroadcastCount === 1 ? 'caution' : 'neutral'}
               />
             </div>
             <p className="wizard-preview__purpose">

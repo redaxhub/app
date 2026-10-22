@@ -409,8 +409,18 @@ export type RedaxTeamAdminS1SubmitCode =
   | 'SUBMITTED_MATCHING_COMPLETE_STATE'
   /** A FINALIZED landed failure or landed-message mismatch, accepted as terminal. */
   | 'SUBMITTED_TERMINAL_FAILURE'
-  /** Not settled yet. Never a failure, never a licence to do anything. */
+  /**
+   * Not settled yet — including a CONFIRMED (not yet finalized) exact message whose planned
+   * state was found complete: that observation is recorded and the attempt is left
+   * unresolved until finality. Never a failure, never a licence to do anything.
+   */
   | 'SUBMITTED_OUTCOME_PENDING'
+  /**
+   * The outcome or the planned accounts could not be READ just now. Recorded as exactly
+   * that. Unreadable is never absence, failure or success, and a later explicit status
+   * check reads again; nothing is sent again.
+   */
+  | 'SUBMITTED_OUTCOME_UNREADABLE'
   /** Broadcast, unresolved, and blocking. A human decides what happens next. */
   | 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT'
   /**
@@ -458,6 +468,12 @@ export interface RedaxTeamAdminS1SubmitResult {
   readonly planFingerprint: string | null
   readonly outputMint: string | null
   readonly campaign: string | null
+  /**
+   * The transaction signature, ONLY on the resolved matching-complete terminal — after
+   * the tombstone that names it was written and READ BACK. A public chain fact for an
+   * explorer link; never a recovery input (recovery reads the durable record, not this).
+   */
+  readonly resolvedSignature: string | null
   readonly attempt: RedaxTeamAdminAttemptProjectionV1
 }
 
@@ -480,8 +496,24 @@ export type RedaxTeamAdminS1ReconcileCode =
   | 'NOT_INVOCATION_STARTED'
   /** `POST_INVOCATION_SIGNATURE_UNKNOWN`: no signature to reconcile against. */
   | 'SIGNATURE_UNKNOWN_UNRESOLVED'
+  /** Not settled yet — a confirmed-but-not-finalized landing included. */
   | 'OUTCOME_PENDING'
+  /** The chain could not be read just now. Nothing is concluded; check again later. */
+  | 'OUTCOME_UNREADABLE'
   | 'OUTCOME_UNRESOLVED_SUPPORT'
+  /**
+   * THE LATE SUCCESS TERMINAL. The exact retained signature's message FINALIZED without
+   * error, one coherent read of the planned accounts matched the plan against the
+   * expectations frozen BEFORE the broadcast, and the matching-complete tombstone was
+   * written under compare-and-set and read back. Nothing was signed or sent to reach it.
+   */
+  | 'MATCHING_COMPLETE_STATE_RESOLVED'
+  /**
+   * The exact message finalized, but the saved record predates the frozen expectations
+   * (record v1), so success cannot be proven without measuring the read against itself.
+   * The record stays open and readable; nothing is guessed and nothing is deleted.
+   */
+  | 'LEGACY_RECORD_SUCCESS_UNPROVABLE'
   /** A FINALIZED landed failure or message mismatch, accepted as terminal. */
   | 'TERMINAL_FAILURE_RESOLVED'
   /** The full finalized no-land conjunction held, and the terminal was read back. */
@@ -507,6 +539,21 @@ export interface RedaxTeamAdminS1ReconcileResult {
   readonly rawBroadcastCount: 0
   readonly walletPromptCount: 0
   readonly signingRequestCount: 0
+  /**
+   * The saved attempt's PUBLIC planned Campaign and output mint, from the durable record,
+   * or `null` when no record was read. Display facts only — never authority.
+   */
+  readonly campaign: string | null
+  readonly outputMint: string | null
+  /**
+   * The Campaign a workspace may be OPENED for, or `null`. Set ONLY when the durable record
+   * is (now, or already) the matching-complete tombstone — so a pending, unreadable,
+   * failed, support-only or legacy record can never offer navigation. Opening a workspace
+   * is local navigation; the workspace performs its own strict chain read.
+   */
+  readonly openableCampaign: string | null
+  /** The retained signature, ONLY alongside `openableCampaign`. Display only. */
+  readonly resolvedSignature: string | null
 }
 
 /**
@@ -1390,14 +1437,21 @@ async function settleSubmittedOutcome(input: {
   readonly namespace: RedaxTeamAdminRecoveryNamespace
   readonly connection: Connection
   readonly programId: PublicKey
-  readonly plan: RedaxFrozenCampaignPlanV1
-  readonly planIdentity: RedaxTeamAdminFrozenPlanIdentity
+  /**
+   * THE FROZEN POST-STATE EXPECTATION. In the submit choreography it comes straight from
+   * the in-memory frozen plan; in the explicit reconciliation it is rebuilt from the
+   * durable v2 record, whose expectations were written and read back BEFORE the one raw
+   * send. Neither caller ever derives a member of it from the read it is compared against.
+   */
+  readonly expectation: RedaxTeamAdminPlanExpectation
   readonly localKnownSignature: RedaxKnownSignature
-  readonly sendContextFloor: number
+  /** The minimum context the coherent account read may be answered at. */
+  readonly readFloor: number
   readonly applyAndVerify: RedaxTeamAdminApplyAndVerify
   readonly readCursor: () => RedaxTeamAdminRecoveryAttemptIdentity
 }): Promise<RedaxTeamAdminSettlementV1> {
-  const { outcome, namespace, plan, localKnownSignature, applyAndVerify, readCursor } = input
+  const { outcome, namespace, expectation, localKnownSignature, applyAndVerify, readCursor } =
+    input
 
   /** Record one observation at `KNOWN_SIGNATURE`, and read it back exactly. */
   const record = async (
@@ -1422,15 +1476,27 @@ async function settleSubmittedOutcome(input: {
     )
   }
 
-  /** Record, then leave the attempt unresolved and blocking. Never a terminal. */
+  /**
+   * Record, then leave the attempt unresolved and blocking. Never a terminal.
+   *
+   * An unreadable observation answers with its own code, so a transient read failure is
+   * never presented as a case for support; every other recorded state keeps the
+   * support-only code it always had.
+   */
   const recordAndBlock = async (
     observation: RedaxTeamAdminRecoveryObservation,
     issueCodes: readonly RedaxTeamAdminRecoveryIssueCode[],
   ): Promise<RedaxTeamAdminSettlementV1> => {
     const recorded = await record(observation, issueCodes)
+    if (!recorded) {
+      return { ok: false, code: 'TERMINAL_RECORD_UNVERIFIED' }
+    }
     return {
       ok: false,
-      code: recorded ? 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT' : 'TERMINAL_RECORD_UNVERIFIED',
+      code:
+        observation === 'READ_UNAVAILABLE'
+          ? 'SUBMITTED_OUTCOME_UNREADABLE'
+          : 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT',
     }
   }
 
@@ -1497,20 +1563,34 @@ async function settleSubmittedOutcome(input: {
   }
 
   // The approved message landed and its metadata reports no error. What the ACCOUNTS say
-  // is a separate question, and it is asked ONCE, coherently, at the accepted send floor.
+  // is a separate question, and it is asked ONCE, coherently, at the accepted floor.
+  let plannedCampaign: PublicKey
+  let plannedOutputMint: PublicKey
+  let plannedFeeVault: PublicKey
+  try {
+    plannedCampaign = new PublicKey(expectation.campaign)
+    plannedOutputMint = new PublicKey(expectation.outputMint)
+    plannedFeeVault = new PublicKey(expectation.protocolFeeVault)
+  } catch {
+    // A planned identity that is not a key cannot be read about, and is not a state a
+    // machine may close.
+    return recordAndBlock('SUPPORT_ONLY', [])
+  }
   const read = await readRedaxTeamAdminS1CoherentStateWithContext(
     input.connection,
     input.programId,
     {
-      campaign: input.planIdentity.campaign,
-      outputMint: input.planIdentity.outputMint,
-      outputMintDecimals: plan.outputMintDecimals,
-      protocolFeeVault: input.planIdentity.protocolFeeVault,
+      campaign: plannedCampaign,
+      outputMint: plannedOutputMint,
+      outputMintDecimals: expectation.outputMintDecimals,
+      protocolFeeVault: plannedFeeVault,
     },
     // ORDINARY POST-SEND EFFECT ASSESSMENT, and therefore `'confirmed'`. The strict
     // finalized no-land proof is the ONLY caller that reads at `'finalized'`, and it is
-    // in the reconciliation entrypoint, not here.
-    { commitment: 'confirmed', minContextSlot: input.sendContextFloor },
+    // in the reconciliation entrypoint, not here. The SUCCESS terminal still requires the
+    // MESSAGE to be finalized (below); the assessor compares only identities and frozen
+    // terms, which later confirmed blocks cannot legitimately change.
+    { commitment: 'confirmed', minContextSlot: input.readFloor },
   )
   if (!read.ok) {
     return recordAndBlock('READ_UNAVAILABLE', [])
@@ -1530,19 +1610,7 @@ async function settleSubmittedOutcome(input: {
     // have created it. Reporting the message as `UNAVAILABLE` instead would be the
     // opposite of true, since it demonstrably WAS read.
     { kind: 'EXACT', accountKeys: [] },
-    {
-      campaign: plan.campaign,
-      campaignAdmin: plan.campaignAdmin,
-      outputGovernance: plan.outputGovernance,
-      outputMint: plan.outputMint,
-      outputMintDecimals: plan.outputMintDecimals,
-      outputMintAuthority: plan.outputMintAuthority,
-      protocolFeeVault: plan.protocolFeeVault,
-      protocolFeeAuthority: plan.protocolFeeAuthority,
-      saltHex: plan.saltHex,
-      endTs: plan.endTs,
-      maxOutputSupply: plan.maxOutputSupply,
-    },
+    expectation,
   )
 
   switch (post.verdict) {
@@ -1551,8 +1619,10 @@ async function settleSubmittedOutcome(input: {
         return { ok: false, code: 'TERMINAL_RECORD_UNVERIFIED' }
       }
       if (outcome.kind !== 'FINALIZED_MESSAGE_META_MATCHING') {
-        // Recorded, and deliberately NOT resolved. See the note above this function.
-        return { ok: false, code: 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT' }
+        // Recorded, and deliberately NOT resolved — see the note above this function. It
+        // is PENDING FINALITY rather than a support case: the same explicit status check
+        // resolves it once the exact message is finalized, and nothing is sent again.
+        return { ok: false, code: 'SUBMITTED_OUTCOME_PENDING' }
       }
       const cursor = readCursor()
       const resolved = await applyAndVerify(
@@ -1673,6 +1743,8 @@ export function RedaxTeamAdminActionsProvider({
       let planFingerprint: string | null = null
       let outputMintAddress: string | null = null
       let campaignAddress: string | null = null
+      // Set only after the matching-complete tombstone that names it was read back.
+      let resolvedSignature: string | null = null
 
       /** Drop custody and every transient, then answer. The ONLY way out of this function. */
       const finish = (
@@ -1698,6 +1770,7 @@ export function RedaxTeamAdminActionsProvider({
           planFingerprint,
           outputMint: outputMintAddress,
           campaign: campaignAddress,
+          resolvedSignature: ok && code === 'SUBMITTED_MATCHING_COMPLETE_STATE' ? resolvedSignature : null,
           attempt: projection,
         }
       }
@@ -2082,6 +2155,11 @@ export function RedaxTeamAdminActionsProvider({
             endTs: plan.endTs,
             maxOutputSupply: plan.maxOutputSupply,
           },
+          // THE FROZEN POST-STATE EXPECTATION, durable and read back BEFORE anything is
+          // signed — the fee authority Phase A froze this plan against. It is what lets a
+          // later explicit status check prove a late-finalized success against the plan
+          // instead of against the very read it is judging.
+          frozenExpectations: { protocolFeeAuthority: plan.protocolFeeAuthority },
           blockhashValidity: {
             preflightContextSlot: Math.max(phaseA.contextSlot, blockhash.blockhashContextSlot),
             lastValidBlockHeight: blockhash.lastValidBlockHeight,
@@ -2209,6 +2287,9 @@ export function RedaxTeamAdminActionsProvider({
           openedReadBack.record.revision !== cursor.revision ||
           openedReadBack.record.lifecycle !== 'PRE_INVOCATION' ||
           openedReadBack.record.planFingerprint !== planFingerprint ||
+          openedReadBack.record.frozenExpectations === null ||
+          openedReadBack.record.frozenExpectations.protocolFeeAuthority !==
+            plan.protocolFeeAuthority ||
           openedReadBack.record.intendedMessage.sha256Hex !== committed.commitment.sha256Hex ||
           openedReadBack.record.intendedMessage.byteLength !== committed.commitment.byteLength
         ) {
@@ -2488,13 +2569,27 @@ export function RedaxTeamAdminActionsProvider({
           namespace,
           connection,
           programId,
-          plan,
-          planIdentity,
+          expectation: {
+            campaign: plan.campaign,
+            campaignAdmin: plan.campaignAdmin,
+            outputGovernance: plan.outputGovernance,
+            outputMint: plan.outputMint,
+            outputMintDecimals: plan.outputMintDecimals,
+            outputMintAuthority: plan.outputMintAuthority,
+            protocolFeeVault: plan.protocolFeeVault,
+            protocolFeeAuthority: plan.protocolFeeAuthority,
+            saltHex: plan.saltHex,
+            endTs: plan.endTs,
+            maxOutputSupply: plan.maxOutputSupply,
+          },
           localKnownSignature,
-          sendContextFloor: postWallet.sendContextFloor,
+          readFloor: postWallet.sendContextFloor,
           applyAndVerify,
           readCursor: () => cursor,
         })
+        if (settled.ok && settled.code === 'SUBMITTED_MATCHING_COMPLETE_STATE') {
+          resolvedSignature = localKnownSignature
+        }
         return finish(settled.ok, settled.code, 'SIGN_ONLY_REFUSAL')
 
       } catch {
@@ -2536,19 +2631,32 @@ export function RedaxTeamAdminActionsProvider({
   //
   // It answers ONE question — what is known about the attempt that already exists? — and
   // the honest answer is very often "still unresolved, still blocking". It writes a
-  // terminal in exactly two situations: a FINALIZED landed failure or message mismatch,
-  // and the full ten-member finalized no-land conjunction. Everything else is recorded
-  // and left blocking.
+  // terminal in exactly three situations: a FINALIZED landed failure or message mismatch;
+  // the full ten-member finalized no-land conjunction; and — for a v2 record only — a
+  // FINALIZED exact message whose planned state matches the expectations frozen before the
+  // broadcast, through the very settlement the submit choreography uses. (The earlier
+  // "exactly two" reading predates the v2 record and is superseded on that point only.)
+  // Everything else is recorded and left blocking.
   const reconcileS1 = useCallback(async (): Promise<RedaxTeamAdminS1ReconcileResult> => {
+    // The record's public planned identities, once a record has been read. They travel on
+    // every later answer as DISPLAY facts; only `openableCampaign` may offer navigation.
+    let recordedCampaign: string | null = null
+    let recordedOutputMint: string | null = null
+    let recordedSignature: string | null = null
     const answer = (
       ok: boolean,
       code: RedaxTeamAdminS1ReconcileCode,
+      openableCampaign: string | null = null,
     ): RedaxTeamAdminS1ReconcileResult => ({
       ok,
       code,
       rawBroadcastCount: 0,
       walletPromptCount: 0,
       signingRequestCount: 0,
+      campaign: recordedCampaign,
+      outputMint: recordedOutputMint,
+      openableCampaign,
+      resolvedSignature: openableCampaign === null ? null : recordedSignature,
     })
 
     try {
@@ -2585,10 +2693,21 @@ export function RedaxTeamAdminActionsProvider({
       if (existing.kind === 'EMPTY') {
         return answer(false, 'NOTHING_TO_RECONCILE')
       }
+      recordedCampaign = existing.record.plan.campaign
+      recordedOutputMint = existing.record.plan.outputMint
+      recordedSignature = existing.record.knownSignature
       if (existing.kind === 'TOMBSTONE') {
         // Already resolved. A tombstone never moves again, and re-deciding one would be
-        // the single most dangerous thing a reconciliation could do.
-        return answer(true, 'ALREADY_RESOLVED')
+        // the single most dangerous thing a reconciliation could do. A matching-complete
+        // tombstone is the one resolution whose Campaign a workspace may be opened for —
+        // which is what lets a reload return to the same campaign with one explicit check.
+        return answer(
+          true,
+          'ALREADY_RESOLVED',
+          existing.record.resolution === 'RESOLVED_MATCHING_COMPLETE_STATE'
+            ? existing.record.plan.campaign
+            : null,
+        )
       }
       const record: RedaxTeamAdminRecoveryRecordV1 = existing.record
       if (record.lifecycle === 'PRE_INVOCATION') {
@@ -2655,7 +2774,8 @@ export function RedaxTeamAdminActionsProvider({
       try {
         finalizedBlockHeight = await connection.getBlockHeight({ commitment: 'finalized' })
       } catch {
-        return answer(false, 'OUTCOME_UNRESOLVED_SUPPORT')
+        // Nothing was read, nothing was written and nothing is concluded.
+        return answer(false, 'OUTCOME_UNREADABLE')
       }
       const strictlyExpired = finalizedBlockHeight > record.blockhashValidity.lastValidBlockHeight
 
@@ -2724,20 +2844,79 @@ export function RedaxTeamAdminActionsProvider({
         outcome.kind === 'CONFIRMED_MESSAGE_META_MATCHING' ||
         outcome.kind === 'FINALIZED_MESSAGE_META_MATCHING'
       ) {
-        // It LANDED and it matched. This entrypoint deliberately does not resolve the
-        // success terminal: the durable record carries no protocol-fee-authority
-        // expectation, so a plan comparison here would have to measure the read against
-        // itself. Recorded, blocking, and left for authority that has the frozen plan.
-        return (await observe('SUPPORT_ONLY', []))
-          ? answer(false, 'OUTCOME_UNRESOLVED_SUPPORT')
-          : answer(false, 'TERMINAL_RECORD_UNVERIFIED')
+        // It LANDED and the exact approved message matched.
+        //
+        // A v1 RECORD CANNOT BE PROVEN HERE, and is not guessed: it carries no frozen
+        // protocol-fee-authority expectation, so a plan comparison would have to measure
+        // the read against itself. Exactly the historical behaviour — recorded,
+        // blocking, readable — under a code that says why.
+        if (record.frozenExpectations === null) {
+          if (outcome.kind === 'CONFIRMED_MESSAGE_META_MATCHING') {
+            return answer(false, 'OUTCOME_PENDING')
+          }
+          return (await observe('SUPPORT_ONLY', []))
+            ? answer(false, 'LEGACY_RECORD_SUCCESS_UNPROVABLE')
+            : answer(false, 'TERMINAL_RECORD_UNVERIFIED')
+        }
+        // A v2 RECORD runs the SAME settlement the submit choreography runs, against the
+        // expectation that was durable and read back BEFORE the one raw send. The
+        // identities and terms come from the record; the mint authority is the planned
+        // Campaign PDA (the program's own rule, also enforced by the setup assembler);
+        // the decimals are the fixed Phase 1 output decimals. Nothing comes from the read.
+        if (outcome.transactionSlot === null) {
+          return answer(false, 'OUTCOME_UNREADABLE')
+        }
+        const settled = await settleSubmittedOutcome({
+          outcome,
+          namespace,
+          connection,
+          programId,
+          expectation: {
+            campaign: record.plan.campaign,
+            campaignAdmin: record.plan.campaignAdmin,
+            outputGovernance: record.plan.outputGovernance,
+            outputMint: record.plan.outputMint,
+            outputMintDecimals: REDAX_OUTPUT_MINT_DECIMALS,
+            outputMintAuthority: record.plan.campaign,
+            protocolFeeVault: record.plan.protocolFeeVault,
+            protocolFeeAuthority: record.frozenExpectations.protocolFeeAuthority,
+            saltHex: record.plan.saltHex,
+            endTs: record.plan.endTs,
+            maxOutputSupply: record.plan.maxOutputSupply,
+          },
+          localKnownSignature: knownSignature,
+          readFloor: Math.max(
+            record.blockhashValidity.preflightContextSlot,
+            outcome.transactionSlot,
+          ),
+          applyAndVerify: applyRecoveryTransition,
+          readCursor: () => cursor,
+        })
+        switch (settled.code) {
+          case 'SUBMITTED_MATCHING_COMPLETE_STATE':
+            return answer(true, 'MATCHING_COMPLETE_STATE_RESOLVED', record.plan.campaign)
+          case 'SUBMITTED_TERMINAL_FAILURE':
+            return answer(true, 'TERMINAL_FAILURE_RESOLVED')
+          case 'SUBMITTED_OUTCOME_PENDING':
+            return answer(false, 'OUTCOME_PENDING')
+          case 'SUBMITTED_OUTCOME_UNREADABLE':
+            return answer(false, 'OUTCOME_UNREADABLE')
+          case 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT':
+            return answer(false, 'OUTCOME_UNRESOLVED_SUPPORT')
+          case 'TERMINAL_RECORD_UNVERIFIED':
+            return answer(false, 'TERMINAL_RECORD_UNVERIFIED')
+          default:
+            // No other settlement code exists after a matching landing. An impossible one
+            // concludes nothing.
+            return answer(false, 'RECONCILE_INTERNAL_FAILURE')
+        }
       }
       if (outcome.kind === 'TRANSACTION_NOT_YET_READABLE') {
         return answer(false, 'OUTCOME_PENDING')
       }
       if (outcome.kind === 'READ_UNAVAILABLE') {
         return (await observe('READ_UNAVAILABLE', []))
-          ? answer(false, 'OUTCOME_UNRESOLVED_SUPPORT')
+          ? answer(false, 'OUTCOME_UNREADABLE')
           : answer(false, 'TERMINAL_RECORD_UNVERIFIED')
       }
 

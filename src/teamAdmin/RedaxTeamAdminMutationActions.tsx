@@ -74,9 +74,14 @@ import { Connection, PublicKey, Transaction } from '@solana/web3.js'
 import { resolveRedaxRuntimeActionConfig } from '../data/redaxDataSourceProvider'
 import {
   deriveTokenConfigPda,
+  readRedaxClassicMintFactsWithContext,
   readRedaxTeamAdminMutationCoherentStateWithContext,
 } from '../data/devnet/redaxDevnetAccounts'
-import type { RedaxTeamAdminMutationCoherentObservationV1 } from '../data/devnet/redaxDevnetAccounts'
+import { computeRedaxTeamAdminMutationRequiredLamports } from './redaxTeamAdminMutationSolModel'
+import type {
+  RedaxClassicMintFactsReadResult,
+  RedaxTeamAdminMutationCoherentObservationV1,
+} from '../data/devnet/redaxDevnetAccounts'
 import {
   assessRedaxTeamAdminMutationPostState,
   type RedaxMutationCoherentObservationV1,
@@ -261,8 +266,27 @@ const METAPLEX_CREATE_FEE_SCALAR_SPACE = 1308
  */
 const METAPLEX_CREATE_FEE_OFFSET_LAMPORTS = 5440
 
-/** The u64 ceiling every lamport sum is checked against after the RPC boundary. */
-const REDAX_TEAM_ADMIN_MUTATION_U64_MAX = 18446744073709551615n
+/**
+ * THE FLAT METAPLEX CREATE FEE OBSERVED ON THE DEPLOYED DEVNET RUNTIME — 0.01 SOL.
+ *
+ * WHY THE AUDITED FORMULA ALONE IS NOT ENOUGH (demo customer flow, 2026-10-22). The audited
+ * source prices the create fee as `rent(1308) + 5440`, which was exactly 10,000,000 lamports
+ * at the old 6,960-lamport-per-byte rent rate. Devnet rent is now lower, so that formula
+ * yields LESS than 0.01 SOL — while a recorded no-send simulation against the deployed
+ * Metaplex program (2026-10-21) levied a FLAT 10,000,000 lamports plus `rent(607)`. The
+ * preflight therefore said "sufficient" for a payer in the gap between the two, and the
+ * transaction would then fail on chain.
+ *
+ * THE CORRECTION TAKES THE LARGER OF THE TWO, so neither the audited source nor the observed
+ * deployed behaviour can be under-funded. It is a CLIENT-SIDE PREFLIGHT ESTIMATE, labelled as
+ * an estimate in the product; it changes no REDAX instruction, account, PDA or economics,
+ * and it is not a claim about the deployed program's code — the deployed-runtime attestation
+ * stays a separate, mandatory step before a bounded operation.
+ */
+const METAPLEX_OBSERVED_FLAT_CREATE_FEE_LAMPORTS = 10_000_000n
+
+// The u64 ceiling every lamport sum is checked against now lives in the pure SOL model
+// (`redaxTeamAdminMutationSolModel.ts`), which performs every lamport sum for this root.
 
 /**
  * What ONE post-init mutation preflight concluded, and nothing else.
@@ -277,13 +301,31 @@ export type RedaxTeamAdminMutationSolPreflightResult =
   | 'INSUFFICIENT'
   | 'READ_UNAVAILABLE'
 
-/** What ONE observation saw INTERNALLY — never returned to a caller. */
+/** What ONE observation saw INTERNALLY. Only the estimate member below exposes amounts. */
 type RedaxTeamAdminMutationSolPreflightObservation =
   | {
       readonly result: 'SUFFICIENT' | 'INSUFFICIENT'
       readonly balanceContextSlot: number
+      readonly requiredLamports: bigint
+      readonly balanceLamports: bigint
     }
   | { readonly result: 'READ_UNAVAILABLE' }
+
+/**
+ * THE DISPLAYED SOL ESTIMATE for one operation: the verdict, the estimated lamports the
+ * operation needs (rent floors, the fee bound and, for metadata, the Metaplex create fee
+ * model above) and the connected Team wallet's observed balance. Decimal strings, or `null`
+ * when unknown. DISPLAY ONLY — never authority; `submitMutation` re-observes regardless.
+ *
+ * The earlier "a bare verdict and nothing else" reading of the preflight surface is
+ * superseded for this one member (demo customer flow, 2026-10-22): a person who is told a
+ * balance is insufficient must be able to see by how much.
+ */
+export interface RedaxTeamAdminMutationSolEstimate {
+  readonly result: RedaxTeamAdminMutationSolPreflightResult
+  readonly requiredLamports: string | null
+  readonly availableLamports: string | null
+}
 
 const REDAX_TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_UNAVAILABLE: RedaxTeamAdminMutationSolPreflightObservation =
   { result: 'READ_UNAVAILABLE' }
@@ -552,7 +594,25 @@ export interface RedaxTeamAdminMutationActionsValue {
   readMutationSolPreflight(
     operation: RedaxTeamAdminMutationOperation,
   ): Promise<RedaxTeamAdminMutationSolPreflightResult>
+  /**
+   * The SAME passive read as `readMutationSolPreflight`, through the SAME private observer,
+   * additionally returning the estimated requirement and the observed balance for DISPLAY.
+   * Read only; same refusals; same one scoped Connection per call. Never authority.
+   */
+  readMutationSolEstimate(
+    operation: RedaxTeamAdminMutationOperation,
+  ): Promise<RedaxTeamAdminMutationSolEstimate>
+  /**
+   * A READ-ONLY classic-SPL mint read, so a person never has to know an input token's
+   * decimals by heart. One scoped Connection per call; it builds, signs and sends nothing.
+   * The answer pre-fills a draft only — `submitMutation` still re-reads both mints in its
+   * own coherent read and refuses on any mismatch before the wallet is asked.
+   */
+  readClassicMintFacts(mint: string): Promise<RedaxTeamAdminClassicMintFactsResult>
 }
+
+/** The classic-mint read's answer, named here so a panel never acquires the data layer. */
+export type RedaxTeamAdminClassicMintFactsResult = RedaxClassicMintFactsReadResult
 
 const RedaxTeamAdminMutationActionsContext =
   createContext<RedaxTeamAdminMutationActionsValue | null>(null)
@@ -647,11 +707,6 @@ function readLiveTeamWallet(broker: RedaxTeamAdminMutationSignOnlyBroker): Publi
 // a licence to answer one operation's question with another's result. A seventh operation
 // would fail the exhaustive `never` below rather than silently inherit a price.
 
-/** Addition that refuses to wrap past the u64 width instead of producing nonsense. */
-function checkedAddMutationLamports(left: bigint, right: bigint): bigint | null {
-  const sum = left + right
-  return sum >= 0n && sum <= REDAX_TEAM_ADMIN_MUTATION_U64_MAX ? sum : null
-}
 
 /**
  * A lamport BALANCE from an untrusted response, or null.
@@ -765,16 +820,6 @@ function mutationRentSpacesFor(operation: RedaxTeamAdminMutationOperation): read
 }
 
 /**
- * THE FLAT LAMPORT TERMS ONE OPERATION MUST COVER BESIDE ITS RENTS.
- */
-function mutationFlatLamportsFor(operation: RedaxTeamAdminMutationOperation): bigint {
-  const feeBound = BigInt(TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_FEE_BOUND_LAMPORTS)
-  return operation === 'SETUP_METADATA'
-    ? feeBound + BigInt(METAPLEX_CREATE_FEE_OFFSET_LAMPORTS)
-    : feeBound
-}
-
-/**
  * Read this operation's live rent floors and the live contextual balance, and compare.
  *
  * UNKNOWN NEVER MEANS SUFFICIENT. A throw, an unreadable response, a rent that is not
@@ -801,7 +846,11 @@ async function observeRedaxTeamAdminMutationSolPreflight(
     return REDAX_TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_UNAVAILABLE
   }
 
-  let required = mutationFlatLamportsFor(operation)
+  // READ every needed rent floor first, then sum them through the ONE pure model
+  // (`redaxTeamAdminMutationSolModel.ts`): the fee bound, the allocated rents and — for
+  // SETUP_METADATA — the larger-of Metaplex create fee. The earlier inline sum, which
+  // under-estimated the metadata levy at today's devnet rent rate, is superseded by it.
+  const rentBySpace = new Map<number, bigint>()
   for (const space of spaces) {
     let rentRead: unknown
     try {
@@ -816,11 +865,24 @@ async function observeRedaxTeamAdminMutationSolPreflight(
     if (rent === null) {
       return REDAX_TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_UNAVAILABLE
     }
-    const next = checkedAddMutationLamports(required, rent)
-    if (next === null) {
-      return REDAX_TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_UNAVAILABLE
-    }
-    required = next
+    rentBySpace.set(space, rent)
+  }
+  const required = computeRedaxTeamAdminMutationRequiredLamports({
+    operation,
+    feeBoundLamports: BigInt(TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_FEE_BOUND_LAMPORTS),
+    rentBySpace,
+    allocatedSpaces: spaces.filter((space) => space !== METAPLEX_CREATE_FEE_SCALAR_SPACE),
+    metadataCreateFee:
+      operation === 'SETUP_METADATA'
+        ? {
+            scalarSpace: METAPLEX_CREATE_FEE_SCALAR_SPACE,
+            auditedOffsetLamports: BigInt(METAPLEX_CREATE_FEE_OFFSET_LAMPORTS),
+            observedFlatFeeLamports: METAPLEX_OBSERVED_FLAT_CREATE_FEE_LAMPORTS,
+          }
+        : null,
+  })
+  if (required === null) {
+    return REDAX_TEAM_ADMIN_MUTATION_SOL_PREFLIGHT_UNAVAILABLE
   }
 
   let balanceRead: unknown
@@ -847,6 +909,8 @@ async function observeRedaxTeamAdminMutationSolPreflight(
   return {
     result: observed.lamports >= required ? 'SUFFICIENT' : 'INSUFFICIENT',
     balanceContextSlot: observed.contextSlot,
+    requiredLamports: required,
+    balanceLamports: observed.lamports,
   }
 }
 
@@ -1028,6 +1092,33 @@ function requestFactsFor(
 }
 
 // --- The provider ------------------------------------------------------------------
+
+/**
+ * THE ONE PASSIVE READ-ONLY `Connection` SITE of this root (demo customer flow, 2026-10-22).
+ *
+ * The passive SOL verdict, its display estimate and the read-only mint read each take one
+ * fresh scoped Connection per explicit call — from HERE, so the root's construction-site
+ * census is unchanged: the attempt Connection, the reconciliation Connection and this one.
+ * A passive Connection is never an attempt Connection, is never registered with the chain
+ * guard and cannot bind a floor.
+ */
+function createRedaxTeamAdminPassiveReadConnection(rpcUrl: string): Connection {
+  return new Connection(rpcUrl, REDAX_TEAM_ADMIN_MUTATION_ACTION_COMMITMENT)
+}
+
+/** The passive (C1) observation through the SAME private observer C2 uses. */
+function observePassiveMutationSolPreflight(
+  rpcUrl: string,
+  payer: PublicKey,
+  operation: RedaxTeamAdminMutationOperation,
+): Promise<RedaxTeamAdminMutationSolPreflightObservation> {
+  return observeRedaxTeamAdminMutationSolPreflight(
+    createRedaxTeamAdminPassiveReadConnection(rpcUrl),
+    payer,
+    operation,
+    null,
+  )
+}
 
 export function RedaxTeamAdminMutationActionsProvider({
   approvedTeamWallet = null,
@@ -2422,22 +2513,77 @@ export function RedaxTeamAdminMutationActionsProvider({
       if (!connectedWallet.equals(approvedTeam)) {
         return 'READ_UNAVAILABLE'
       }
-      const connection = new Connection(
-        runtimeConfig.rpcUrl,
-        REDAX_TEAM_ADMIN_MUTATION_ACTION_COMMITMENT,
-      )
       // `minContextSlot = null`: a passive read has no attempt, and therefore no attempt
       // floor to be measured against. C2 is the call that supplies one.
-      const observation = await observeRedaxTeamAdminMutationSolPreflight(
-        connection,
+      const observation = await observePassiveMutationSolPreflight(
+        runtimeConfig.rpcUrl,
         approvedTeam,
         operation,
-        null,
       )
       // THE BARE VERDICT AND NOTHING ELSE. The observed context slot stops here.
       return observation.result
     },
     [approvedTeamWallet, broker],
+  )
+
+  /** The display estimate — the same refusals and observer as the bare verdict above. */
+  const readMutationSolEstimate = useCallback(
+    async (operation: RedaxTeamAdminMutationOperation): Promise<RedaxTeamAdminMutationSolEstimate> => {
+      const unknown: RedaxTeamAdminMutationSolEstimate = {
+        result: 'READ_UNAVAILABLE',
+        requiredLamports: null,
+        availableLamports: null,
+      }
+      const runtimeConfig = resolveRedaxRuntimeActionConfig()
+      if (!runtimeConfig.ok || !broker.isConnected || !broker.canSignOnly || approvedTeamWallet === null) {
+        return unknown
+      }
+      let approvedTeam: PublicKey
+      try {
+        approvedTeam = new PublicKey(approvedTeamWallet)
+      } catch {
+        return unknown
+      }
+      const connectedWallet = readLiveTeamWallet(broker)
+      if (connectedWallet === null || !connectedWallet.equals(approvedTeam)) {
+        return unknown
+      }
+      const observation = await observePassiveMutationSolPreflight(
+        runtimeConfig.rpcUrl,
+        approvedTeam,
+        operation,
+      )
+      if (observation.result === 'READ_UNAVAILABLE') {
+        return unknown
+      }
+      return {
+        result: observation.result,
+        requiredLamports: observation.requiredLamports.toString(),
+        availableLamports: observation.balanceLamports.toString(),
+      }
+    },
+    [approvedTeamWallet, broker],
+  )
+
+  /** One read-only classic-SPL mint read. No wallet is needed: a mint is public. */
+  const readClassicMintFacts = useCallback(
+    async (mint: string): Promise<RedaxClassicMintFactsReadResult> => {
+      const runtimeConfig = resolveRedaxRuntimeActionConfig()
+      if (!runtimeConfig.ok) {
+        return { ok: false, code: 'READ_UNAVAILABLE' }
+      }
+      let mintKey: PublicKey
+      try {
+        mintKey = new PublicKey(mint)
+      } catch {
+        return { ok: false, code: 'NOT_A_PUBLIC_KEY' }
+      }
+      return readRedaxClassicMintFactsWithContext(
+        createRedaxTeamAdminPassiveReadConnection(runtimeConfig.rpcUrl),
+        mintKey,
+      )
+    },
+    [],
   )
 
   const value = useMemo<RedaxTeamAdminMutationActionsValue>(
@@ -2448,8 +2594,17 @@ export function RedaxTeamAdminMutationActionsProvider({
       reconcileMutation,
       readMutationStatus,
       readMutationSolPreflight,
+      readMutationSolEstimate,
+      readClassicMintFacts,
     }),
-    [submitMutation, reconcileMutation, readMutationStatus, readMutationSolPreflight],
+    [
+      submitMutation,
+      reconcileMutation,
+      readMutationStatus,
+      readMutationSolPreflight,
+      readMutationSolEstimate,
+      readClassicMintFacts,
+    ],
   )
   // `busy` drives no rendering here — this root renders no control of its own — but it is
   // read so the rendered latch is a real state dependency rather than dead weight a later

@@ -27,6 +27,9 @@ import { isDevnetProgramMode } from '../data/redaxModePredicates'
 import { MetricRow } from '../components/MetricRow'
 import { ProofBoundaryNote } from '../components/ProofBoundaryNote'
 import { RedaxUnlistedCampaignAdoption } from '../components/RedaxUnlistedCampaignAdoption'
+import { RedaxPublicAddress } from '../components/RedaxPublicAddress'
+import type { RedaxCampaignLinkQuery } from '../lib/redaxPublicLinks'
+import { describeRedaxCampaignEnd, describeRedaxGrossCap } from '../lib/redaxCampaignFacts'
 import { StatusPill, type StatusTone } from '../components/StatusPill'
 import { SurfaceCard } from '../components/SurfaceCard'
 import {
@@ -252,6 +255,10 @@ export interface HomeScreenProps {
    * passes it up unchanged and classifies nothing.
    */
   onAdoptUnlistedCampaign: (campaignId: string) => void
+  /** What the page's `?campaign=` link said, parsed once by App. A prefill only. */
+  campaignLinkQuery?: RedaxCampaignLinkQuery
+  /** The cluster explorer links target. `null` renders no explorer link. */
+  explorerCluster?: string | null
 }
 
 function endsKey(endsInSeconds: number | null): number {
@@ -277,6 +284,8 @@ export function HomeScreen({
   onSortModeChange,
   onSelectCampaign,
   onAdoptUnlistedCampaign,
+  campaignLinkQuery = { kind: 'NONE' },
+  explorerCluster = null,
 }: HomeScreenProps) {
   const isDevnetProgram = isDevnetProgramMode(environment?.mode)
 
@@ -455,7 +464,11 @@ export function HomeScreen({
             it opens nothing itself, reads nothing, and lists nothing.
           */}
           {isDevnetProgram ? (
-            <RedaxUnlistedCampaignAdoption onAdoptCampaign={onAdoptUnlistedCampaign} />
+            <RedaxUnlistedCampaignAdoption
+              campaignLinkQuery={campaignLinkQuery}
+              onAdoptCampaign={onAdoptUnlistedCampaign}
+              openCampaignId={selectedCampaign?.campaignAddress ?? null}
+            />
           ) : null}
 
           {selectedCampaign ? (
@@ -510,11 +523,34 @@ export function HomeScreen({
                   selectedCampaign.outputMintLabel,
                 )}
               />
+              {selectedCampaign.campaignAddress !== undefined ? (
+                <RedaxPublicAddress
+                  explorerCluster={explorerCluster}
+                  kind="address"
+                  label="Campaign address"
+                  value={selectedCampaign.campaignAddress}
+                />
+              ) : null}
               <MetricRow
                 label="Campaign window"
-                value={selectedRow ? formatCountdown(selectedRow.endsInSeconds) : '—'}
-                hint="conversions are rejected after the window closes"
+                value={
+                  selectedRow
+                    ? formatCountdown(selectedRow.endsInSeconds)
+                    : describeRedaxCampaignEnd(selectedCampaign.endTs, Date.now())
+                }
+                hint="conversions are rejected after the window closes (the network’s clock decides)"
               />
+              {selectedRow === null ? (
+                <MetricRow
+                  label="Campaign output limit (gross)"
+                  value={describeRedaxGrossCap(
+                    selectedCampaign.maxOutputSupplyRaw,
+                    selectedCampaign.totalOutputMintedRaw,
+                    9,
+                  )}
+                  hint="read from the campaign account"
+                />
+              ) : null}
               <MetricRow label="Protocol fee" value="100 bps (1%)" hint="disclosed up front, deducted from gross output" />
             </SurfaceCard>
           ) : (

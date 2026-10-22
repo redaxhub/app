@@ -140,6 +140,11 @@ import {
 } from './redaxTransactionOutcome'
 import { useRedaxWalletActionTransport } from './RedaxWalletProvider'
 import type { RedaxWalletActionTransport } from './RedaxWalletProvider'
+import { readRedaxConvertTransactionScopedEffect } from './redaxHolderTransactionEffect'
+import type {
+  RedaxConvertTransactionEffectExpectation,
+  RedaxConvertTransactionEffectVerdict,
+} from './redaxHolderTransactionEffect'
 
 // --- Vocabulary ---------------------------------------------------------------
 
@@ -723,6 +728,14 @@ export interface RedaxHolderActionPorts {
     dataLength: number,
     options: { readonly commitment: 'confirmed' },
   ) => Promise<unknown>
+  /**
+   * The transaction-scoped convert effect proof (see `redaxHolderTransactionEffect.ts`).
+   * OPTIONAL: a port set without it simply never forms a second opinion.
+   */
+  readonly readConvertTransactionEffect?: (
+    connection: Connection,
+    expected: RedaxConvertTransactionEffectExpectation,
+  ) => Promise<RedaxConvertTransactionEffectVerdict>
 }
 
 export const REDAX_PRODUCTION_HOLDER_ACTION_PORTS: RedaxHolderActionPorts = {
@@ -760,6 +773,32 @@ export const REDAX_PRODUCTION_HOLDER_ACTION_PORTS: RedaxHolderActionPorts = {
     ),
   readRentExemptMinimum: (connection, dataLength, options) =>
     connection.getMinimumBalanceForRentExemption(dataLength, options.commitment),
+  readConvertTransactionEffect: (connection, expected) =>
+    readRedaxConvertTransactionScopedEffect(connection, expected, commitRedaxIntendedLegacyMessage),
+}
+
+/**
+ * Build the convert probe's second opinion from the identities and amounts the attempt
+ * froze, or `undefined` when the port set has no transaction-scoped reader.
+ */
+function convertTransactionScopedEffect(
+  ports: RedaxHolderActionPorts,
+  connection: Connection,
+  facts: Omit<
+    RedaxConvertTransactionEffectExpectation,
+    'signature' | 'commitment' | 'mode'
+  >,
+): RedaxActionEffectProbe['readTransactionScopedEffect'] {
+  const reader = ports.readConvertTransactionEffect
+  if (reader === undefined) {
+    return undefined
+  }
+  return async (signature, commitment, mode) => {
+    const verdict = await reader(connection, { ...facts, signature, commitment, mode })
+    return verdict.kind === 'UNAVAILABLE'
+      ? EFFECT_UNAVAILABLE
+      : { kind: verdict.kind, contextSlot: verdict.transactionSlot }
+  }
 }
 
 /** The validated DEVNET_TX_ENABLED runtime facts an action needs. */
@@ -1043,6 +1082,21 @@ interface RedaxActionEffectProbe {
    * convert never can, and the journal itself refuses to record it for convert.
    */
   readonly allowsEffectPresentOriginUnknown: boolean
+  /**
+   * CONVERT ONLY, and only as a SECOND opinion. When the shared-state comparison above
+   * cannot attribute a landed exact message — because another holder's conversion or a
+   * lifecycle change moved the shared accounts, or the strict reader refuses a paused or
+   * finalized Campaign — this proves the effect from THIS signature's own finalized (or
+   * confirmed) transaction: exact message, no error, and the three token accounts moved by
+   * exactly the approved amounts (or, for `NO_EFFECT`, not at all). It is never consulted
+   * when the first opinion already matched, and its refusal leaves the first opinion's
+   * verdict standing.
+   */
+  readonly readTransactionScopedEffect?: (
+    signature: string,
+    commitment: 'confirmed' | 'finalized',
+    mode: 'EFFECT' | 'NO_EFFECT',
+  ) => Promise<RedaxEffectVerdict>
 }
 
 /**
@@ -2060,6 +2114,27 @@ async function runBoundedHn2Pass(runtime: RedaxAttemptRuntime): Promise<RedaxHn2
  * narrower parameter is what makes that reuse safe — the reconciler cannot reach HN2
  * through a runtime that has no discovery address on it.
  */
+/**
+ * The first opinion, then — ONLY when it could not attribute the effect — the
+ * transaction-scoped second opinion. A match from either is a match; otherwise the FIRST
+ * opinion's verdict stands, so an unreadable second opinion never upgrades anything and a
+ * probe without one behaves exactly as before.
+ */
+async function readEffectWithTransactionScope(
+  probe: RedaxActionEffectProbe,
+  floor: number,
+  signature: string,
+  commitment: 'confirmed' | 'finalized',
+  mode: 'EFFECT' | 'NO_EFFECT',
+): Promise<RedaxEffectVerdict> {
+  const first = mode === 'EFFECT' ? await probe.readEffectMatching(floor) : await probe.readNoEffect(floor)
+  if (first.kind === 'MATCHING' || probe.readTransactionScopedEffect === undefined) {
+    return first
+  }
+  const scoped = await probe.readTransactionScopedEffect(signature, commitment, mode)
+  return scoped.kind === 'MATCHING' ? scoped : first
+}
+
 async function resolveKnownSignature(
   runtime: RedaxKnownSignatureRuntime,
   signature: RedaxKnownSignature,
@@ -2119,7 +2194,13 @@ async function resolveKnownSignature(
         runtime.preflightFloor,
         outcome.transactionSlot === null ? runtime.preflightFloor : outcome.transactionSlot,
       )
-      const noEffect = await runtime.probe.readNoEffect(floor)
+      const noEffect = await readEffectWithTransactionScope(
+        runtime.probe,
+        floor,
+        signature,
+        'finalized',
+        'NO_EFFECT',
+      )
       if (noEffect.kind === 'UNAVAILABLE') {
         await recordObservation(runtime, 'READ_UNAVAILABLE', null)
         return neutral('READ_UNAVAILABLE', signature, outcome.finality, outcome.transactionSlot)
@@ -2155,7 +2236,13 @@ async function resolveKnownSignature(
         runtime.preflightFloor,
         outcome.transactionSlot === null ? runtime.preflightFloor : outcome.transactionSlot,
       )
-      const effect = await runtime.probe.readEffectMatching(floor)
+      const effect = await readEffectWithTransactionScope(
+        runtime.probe,
+        floor,
+        signature,
+        'confirmed',
+        'EFFECT',
+      )
       if (effect.kind === 'UNAVAILABLE') {
         await recordObservation(runtime, 'READ_UNAVAILABLE', null)
         return neutral('READ_UNAVAILABLE', signature, outcome.finality, outcome.transactionSlot)
@@ -2178,7 +2265,13 @@ async function resolveKnownSignature(
         return neutral('SUPPORT_ONLY', signature, outcome.finality, outcome.transactionSlot)
       }
       const floor = Math.max(runtime.preflightFloor, outcome.transactionSlot)
-      const effect = await runtime.probe.readEffectMatching(floor)
+      const effect = await readEffectWithTransactionScope(
+        runtime.probe,
+        floor,
+        signature,
+        'finalized',
+        'EFFECT',
+      )
       if (effect.kind === 'UNAVAILABLE') {
         await recordObservation(runtime, 'READ_UNAVAILABLE', null)
         return neutral('READ_UNAVAILABLE', signature, outcome.finality, outcome.transactionSlot)
@@ -3331,6 +3424,21 @@ export function createRedaxConvertExactInAction(
       // move for other reasons, and an unattributed conversion is not a conversion
       // this attempt may claim.
       allowsEffectPresentOriginUnknown: false,
+      // The SECOND opinion, from this attempt's own transaction — frozen identities and
+      // amounts only, never a value read after the fact.
+      readTransactionScopedEffect: convertTransactionScopedEffect(ports, connection, {
+        intendedMessage: commitment.commitment,
+        minimumSlot: preflightFloor,
+        wallet: wallet.toBase58(),
+        userLegacyAta: before.userLegacyAta.toBase58(),
+        legacyMint: legacyMint.toBase58(),
+        userOutputAta: before.userOutputAta.toBase58(),
+        outputMint: outputMint.toBase58(),
+        protocolFeeVault: protocolFeeVault.toBase58(),
+        amountIn: amounts.amountIn,
+        netOut: amounts.netOut,
+        protocolFee: amounts.protocolFee,
+      }),
     }
 
     const runtime: RedaxAttemptRuntime = {
@@ -3995,6 +4103,21 @@ function planConvertRecoveryProbe(
       // As in the original convert: tokens can move for other reasons, so an
       // unattributed conversion is never this attempt's.
       allowsEffectPresentOriginUnknown: false,
+      // The same second opinion the live convert carries, rebuilt from the durable record
+      // alone: its intended message, its floor, its identities and its approved amounts.
+      readTransactionScopedEffect: convertTransactionScopedEffect(ports, connection, {
+        intendedMessage: record.intendedMessage,
+        minimumSlot: record.preflightContextSlot,
+        wallet: wallet.toBase58(),
+        userLegacyAta: recordedLegacyAtaText,
+        legacyMint: legacyMint.toBase58(),
+        userOutputAta: recordedOutputAtaText,
+        outputMint: outputMint.toBase58(),
+        protocolFeeVault: protocolFeeVault.toBase58(),
+        amountIn,
+        netOut,
+        protocolFee,
+      }),
     }
   }
 }

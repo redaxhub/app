@@ -25,11 +25,19 @@
 // Campaign allowlist are judged by. There is no second regex here and no second idea of
 // what an address is. Spelling is not existence: a canonical address proves only that
 // the text is well formed, never that a REDAX campaign is there.
+//
+// A SHARE LINK IS A PREFILL (demo customer flow, 2026-10-22). When the page was opened with
+// `?campaign=<address>`, App hands the parsed value here and it becomes the INITIAL draft —
+// nothing more. The earlier "touches no URL" reading is superseded on exactly that point:
+// adoption still happens only from the button's own click, after the person has seen the
+// address, and an invalid or duplicated link value is refused here with a fixed notice and
+// is never pre-filled.
 
 import { useState } from 'react'
 
 import { isCanonicalRedaxPublicKey } from '../config/redaxEnv'
 import { UNLISTED_CAMPAIGN_ADOPTION } from '../lib/productCopy'
+import type { RedaxCampaignLinkQuery } from '../lib/redaxPublicLinks'
 import { SurfaceCard } from './SurfaceCard'
 
 export interface RedaxUnlistedCampaignAdoptionProps {
@@ -39,14 +47,22 @@ export interface RedaxUnlistedCampaignAdoptionProps {
    * automatically.
    */
   readonly onAdoptCampaign: (campaignId: string) => void
+  /** The page's `?campaign=` value as App parsed it once at load. A prefill only. */
+  readonly campaignLinkQuery?: RedaxCampaignLinkQuery
+  /** The campaign currently open, if any — only to say whether the link's one is it. */
+  readonly openCampaignId?: string | null
 }
 
 const ADOPTION_INPUT_ID = 'redax-unlisted-campaign-address'
 
 export function RedaxUnlistedCampaignAdoption({
   onAdoptCampaign,
+  campaignLinkQuery = { kind: 'NONE' },
+  openCampaignId = null,
 }: RedaxUnlistedCampaignAdoptionProps) {
-  const [draft, setDraft] = useState<string>('')
+  const [draft, setDraft] = useState<string>(() =>
+    campaignLinkQuery.kind === 'VALID' ? campaignLinkQuery.campaign : '',
+  )
   const [refused, setRefused] = useState<boolean>(false)
 
   // THE WHOLE EFFECT OF A CLICK. Outer whitespace the human typed is trimmed exactly
@@ -69,6 +85,21 @@ export function RedaxUnlistedCampaignAdoption({
       footnote={UNLISTED_CAMPAIGN_ADOPTION.boundary}
     >
       <p className="note-line">{UNLISTED_CAMPAIGN_ADOPTION.intro}</p>
+      {campaignLinkQuery.kind === 'VALID' ? (
+        campaignLinkQuery.campaign === openCampaignId ? (
+          <p className="wizard-preview__fieldhint">This page’s link names the campaign that is open now.</p>
+        ) : (
+          <p className="wizard-preview__fieldhint">
+            This page was opened with a campaign link. Its address is filled in below — check it, then press the button to read it from devnet. Opening it does not list it, and does not mean REDAX reviewed it.
+          </p>
+        )
+      ) : campaignLinkQuery.kind === 'INVALID' ? (
+        <p className="wizard-preview__fieldwarning">
+          {campaignLinkQuery.reason === 'DUPLICATE'
+            ? 'This page’s link named more than one campaign, so none was used. Nothing was opened.'
+            : 'This page’s link did not contain a valid campaign address, so it was not used. Nothing was opened.'}
+        </p>
+      ) : null}
       <div className="wizard-preview__field">
         <label className="wizard-preview__fieldname" htmlFor={ADOPTION_INPUT_ID}>
           {UNLISTED_CAMPAIGN_ADOPTION.inputLabel}

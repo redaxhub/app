@@ -2168,3 +2168,149 @@ button {
   line-height: 1.55;
   color: var(--text-secondary);
 }
+
+/* --- Demo customer flow (2026-10-22): full public addresses, human-unit terms, ---
+   --- workspace summary. Every long value wraps instead of widening the page. --- */
+
+.public-address {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  margin: 6px 0;
+  min-width: 0;
+}
+
+.public-address__label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.public-address__value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: all;
+  min-width: 0;
+}
+
+.public-address__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.public-address__link {
+  color: var(--accent);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.human-terms {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  min-width: 0;
+}
+
+.human-terms legend {
+  padding: 0 4px;
+}
+
+/* A human-terms group is ONE stacked block whose legend already names it, so it takes the
+   full row instead of the label column of the two-column field grid. */
+.wizard-preview__field.human-terms {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* An accepted-input row carries one stacked human-terms form, so the row is one column too;
+   otherwise the whole form sits in the narrow label column and the mint address is cut off. */
+.wizard-preview__field:has(> .wizard-preview__fieldbody.human-terms) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.human-terms__group {
+  border: 0;
+  padding: 0;
+  margin: 10px 0 0;
+  min-width: 0;
+}
+
+.human-terms__choice,
+.human-terms__ack {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 4px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.human-terms__rate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+}
+
+.human-terms__small {
+  width: 7.5em;
+  max-width: 100%;
+}
+
+.human-terms__row {
+  margin: 8px 0;
+}
+
+.human-terms__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.human-terms__review {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.technical-details {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.technical-details summary {
+  cursor: pointer;
+}
+
+.workspace-summary__steps {
+  display: grid;
+  gap: 6px;
+  padding-left: 18px;
+  margin: 10px 0;
+}
+
+.workspace-summary__check {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.wizard-preview__input,
+.metric__value {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}

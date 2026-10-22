@@ -4080,3 +4080,61 @@ export async function readRedaxTeamAdminMutationCoherentStateWithContext(
     observation: { campaign, tokenConfig, metadata, legacyMint, outputMint, clock },
   }
 }
+
+// --- Read-only classic-SPL mint facts (demo customer flow, 2026-10-22) -------------
+//
+// ONE account read so a person adding an accepted input never has to know its decimals by
+// heart. It validates exactly what the program will validate — the SPL Token program owns
+// the account, the classic 82-byte mint layout, an initialized mint — and returns the mint's
+// declared decimals. Token-2022 and extension mints are refused (Phase 1 is classic SPL
+// only). It is a PREFILL source: the mutation root re-reads both mints in its own coherent
+// read and refuses on any mismatch before a wallet is asked.
+
+export type RedaxClassicMintFactsReadCode =
+  | 'NOT_A_PUBLIC_KEY'
+  | 'READ_UNAVAILABLE'
+  | 'MINT_ACCOUNT_ABSENT'
+  | 'NOT_A_CLASSIC_SPL_MINT'
+  | 'MINT_NOT_INITIALIZED'
+
+export type RedaxClassicMintFactsReadResult =
+  | {
+      readonly ok: true
+      readonly mint: string
+      readonly decimals: number
+      readonly contextSlot: number
+    }
+  | { readonly ok: false; readonly code: RedaxClassicMintFactsReadCode }
+
+export async function readRedaxClassicMintFactsWithContext(
+  connection: Pick<Connection, 'getAccountInfoAndContext'>,
+  mint: PublicKey,
+): Promise<RedaxClassicMintFactsReadResult> {
+  let response: Awaited<ReturnType<Connection['getAccountInfoAndContext']>>
+  try {
+    response = await connection.getAccountInfoAndContext(mint, { commitment: 'confirmed' })
+  } catch {
+    return { ok: false, code: 'READ_UNAVAILABLE' }
+  }
+  const contextSlot = response?.context?.slot
+  if (typeof contextSlot !== 'number' || !Number.isSafeInteger(contextSlot)) {
+    return { ok: false, code: 'READ_UNAVAILABLE' }
+  }
+  const info = response.value
+  if (info === null) {
+    return { ok: false, code: 'MINT_ACCOUNT_ABSENT' }
+  }
+  if (!info.owner.equals(TOKEN_PROGRAM_ID) || info.data.length !== CLASSIC_MINT_ACCOUNT_LENGTH) {
+    return { ok: false, code: 'NOT_A_CLASSIC_SPL_MINT' }
+  }
+  let decoded: ReturnType<typeof unpackMint>
+  try {
+    decoded = unpackMint(mint, info, TOKEN_PROGRAM_ID)
+  } catch {
+    return { ok: false, code: 'NOT_A_CLASSIC_SPL_MINT' }
+  }
+  if (!decoded.isInitialized) {
+    return { ok: false, code: 'MINT_NOT_INITIALIZED' }
+  }
+  return { ok: true, mint: mint.toBase58(), decimals: decoded.decimals, contextSlot }
+}

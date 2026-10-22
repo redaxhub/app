@@ -31,6 +31,7 @@
 // wallet, and enables no action. Neither the preview nor the role panel has
 // a builder, a wallet bridge, a send/sign path, or a transaction of its own.
 
+import { describeRedaxCampaignEnd, describeRedaxGrossCap } from '../lib/redaxCampaignFacts'
 import type { ReactNode } from 'react'
 import type {
   RedaxCampaignInputSummaryView,
@@ -171,7 +172,7 @@ function buildSetupChecks(
     { label: 'Lifecycle status', value: status.label, tone: status.tone },
     {
       label: 'Metadata setup',
-      value: campaign.metadataSetup ? 'Complete' : 'metadata_not_ready',
+      value: campaign.metadataSetup ? 'Complete' : 'Not set yet',
       tone: campaign.metadataSetup ? 'positive' : 'caution',
     },
   ]
@@ -181,10 +182,17 @@ function buildSetupChecks(
     tone: 'info',
   }
   if (row === null) {
+    // DEMO CUSTOMER FLOW (2026-10-22): the window and the output cap of an unlisted campaign
+    // are read straight from its own Campaign account — App already loaded them — rather than
+    // shown as "not directory-derived". Proof completeness is a directory metric and stays so.
     return [
       ...campaignChecks,
-      { label: 'Campaign window', value: CAMPAIGN_NOT_DIRECTORY_DERIVED, tone: 'neutral' },
-      { label: 'Output cap', value: CAMPAIGN_NOT_DIRECTORY_DERIVED, tone: 'neutral' },
+      { label: 'Campaign window', value: describeRedaxCampaignEnd(campaign.endTs, Date.now()), tone: 'neutral' },
+      {
+        label: 'Output cap',
+        value: describeRedaxGrossCap(campaign.maxOutputSupplyRaw, campaign.totalOutputMintedRaw, 9),
+        tone: 'neutral',
+      },
       acceptedInputsCheck,
       { label: 'Proof completeness', value: CAMPAIGN_NOT_DIRECTORY_DERIVED, tone: 'neutral' },
     ]

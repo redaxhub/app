@@ -175,7 +175,7 @@ export const CAMPAIGN_NOT_DIRECTORY_DERIVED_NOTE =
 export const TEAM_ADMIN_OPEN_UNLISTED_WORKSPACE = {
   label: 'Open the new campaign workspace',
   help:
-    'Moves this page to the campaign that was just created, so its post-init steps can be worked on. It is local navigation only: it signs nothing, sends nothing, reads nothing, and does not add the campaign to the public directory.',
+    'Moves this page to the campaign that was just created, so its post-init steps can be worked on. It signs nothing, sends nothing and does not add the campaign to the public directory. The page then reads that campaign, and each step checks its own saved action once — read-only.',
 } as const
 
 
@@ -1919,13 +1919,13 @@ export const TEAM_ADMIN_CAMPAIGN_CREATE: TeamAdminCampaignCreateCopy = {
   fields: [
     {
       id: 'endTs',
-      label: 'Campaign end (Unix seconds)',
-      note: 'Optional. Leave it empty for no deadline; if set, it must be strictly in the future when the campaign is initialized.',
+      label: 'Campaign end date and time',
+      note: 'Choose a date and time with a visible time zone, or choose No end date. It must be in the future when the campaign is created.',
     },
     {
       id: 'maxOutputSupply',
-      label: 'Maximum output supply (base units)',
-      note: 'Required, in base units of the output token. Enter 0 for uncapped.',
+      label: 'Campaign output limit (new tokens, before the fee)',
+      note: 'Enter an amount of new tokens, or choose No limit. It is converted exactly to the output token’s 9-decimal base units.',
     },
     {
       id: 'metadataName',
@@ -1978,6 +1978,143 @@ export const TEAM_ADMIN_CAMPAIGN_CREATE: TeamAdminCampaignCreateCopy = {
   ],
   footnote:
     'Devnet-only Campaign Create. A visible control is not proof that a transaction was submitted or landed, and it does not imply metadata, TokenConfig, or activation completion.',
+}
+
+// --- Campaign Create in human units (demo customer flow, 2026-10-22) ---------
+//
+// The person types amounts of tokens and a date-time; the panel converts both EXACTLY to
+// the raw strings the S1 plan has always carried, shows the conversion beside the field,
+// and freezes it in a review that needs an acknowledgement. "No limit" and "No end date"
+// are explicit choices, never what an empty field means.
+
+export const TEAM_ADMIN_CREATE_TERMS = {
+  permanenceNote:
+    'The output limit and the end date are written into the campaign permanently. They cannot be changed later; a mistake needs a new campaign.',
+  capLegend: 'Campaign output limit',
+  capLimitChoice: 'Set a limit',
+  capNoneChoice: 'No limit',
+  capAmountLabel: 'Limit in new tokens (before the 1% fee)',
+  capNote:
+    'This limits the GROSS new tokens all holders together can receive (each holder’s net amount plus the REDAX fee). It is not reserved for anyone, and per-input limits may add up to more than it.',
+  capChooseNote: 'Choose Set a limit or No limit.',
+  capNoneSummary: 'No campaign-wide limit (stored as 0, which the program reads as unlimited).',
+  endLegend: 'Campaign end',
+  endNoneChoice: 'No end date',
+  endAtChoice: 'Ends at a date and time',
+  endDateTimeLabel: 'End date and time',
+  endZoneLabel: 'Time zone of the date and time above',
+  endNote:
+    'Shown in your time zone and in UTC. The network’s clock — not this device’s — decides when conversions stop. Reaching the end does not finalize the campaign by itself.',
+  endChooseNote: 'Choose No end date or Ends at a date and time.',
+  endNoneSummary: 'No end date.',
+  metadataLegend: 'Planned output token details',
+  presetNote:
+    'Ready-made identities this deployment approved. Choosing one fills all three values consistently; it is still only a plan until the separate metadata step.',
+  reviewTitle: 'Review the permanent terms',
+  reviewLabel: 'Review campaign terms',
+  reviewBlockedNote: 'Fix the highlighted terms first; nothing was reviewed.',
+  reviewStaleNote:
+    'The terms or the connected wallet changed after the review. Review again before creating the campaign.',
+  endPassedDuringReviewNote:
+    'The chosen end time has passed while the review was open. Choose a later time and review again. Nothing was sent.',
+  reviewCapLabel: 'Output limit (gross)',
+  reviewEndLabel: 'End',
+  reviewPlannedLabel: 'Planned token',
+  acknowledgeLabel:
+    'I checked the output limit and end above and understand they cannot be changed after the campaign is created.',
+  createdTitle: 'Your campaign',
+  startAnotherLabel: 'Start another campaign',
+  startAnotherHelp:
+    'Clears this form so a new campaign can be prepared. It does not change the campaign that was created.',
+} as const
+
+// --- Accepted inputs in human units (demo customer flow, 2026-10-22) ----------
+//
+// An accepted input is described as a person thinks of it: which token, how many old
+// tokens become how many new tokens before the fee, and how many new tokens this input may
+// mint at most (or no limit). The token's decimals are READ from the chain, never typed.
+
+export const TEAM_ADMIN_TOKEN_CONFIG_TERMS = {
+  mintLabel: 'Old token mint address',
+  mintReading: 'Reading the token from devnet…',
+  mintReadAgain: 'Read token details again',
+  mintRefused: {
+    NOT_A_PUBLIC_KEY: 'This is not a valid token mint address.',
+    READ_UNAVAILABLE: 'The token could not be read from devnet just now. Try Read token details again.',
+    MINT_ACCOUNT_ABSENT: 'No token exists at this address on devnet.',
+    NOT_A_CLASSIC_SPL_MINT: 'This address is not a classic SPL token mint. Phase 1 accepts classic SPL tokens only.',
+    MINT_NOT_INITIALIZED: 'This token mint is not initialized.',
+  },
+  mintPending: 'Paste the full mint address of the old token; its details are read from devnet.',
+  rateLegend: 'Conversion rate',
+  rateOldLabel: 'Old tokens',
+  rateNewLabel: 'become new tokens (gross, before the 1% fee)',
+  rateNote:
+    'Whole tokens on both sides — for example 1 → 1, 2 → 3, 3 → 7. The program first adjusts for each token’s decimals, then applies this exact ratio, then takes the 1% fee; the ratio is stored exactly, never rounded to a decimal.',
+  capLegend: 'Limit for this input',
+  capLimitChoice: 'Set a limit',
+  capNoneChoice: 'No limit',
+  capAmountLabel: 'Most new tokens this input may produce (gross)',
+  capNote:
+    'Counts gross new tokens (holders’ net plus the REDAX fee) produced from this input across all holders. It is not reserved for anyone.',
+  reviewTitle: 'Review this input — it cannot be changed after it is added',
+  acknowledgeLabel: 'I checked this input’s token, rate and limit.',
+  acknowledgeRequired: 'Review and tick the box above before adding this input.',
+  capSumNote:
+    'The per-input limits together exceed the campaign limit. That is allowed: every conversion must fit BOTH its input limit and the campaign limit, and whoever converts first uses the room.',
+} as const
+
+/** Business-language names for the raw row fields an issue can point at. */
+export const TEAM_ADMIN_TOKEN_CONFIG_FIELD_NAMES: Readonly<Record<string, string>> = {
+  legacyMint: 'Old token',
+  expectedLegacyDecimals: 'Old token decimals',
+  rateNumerator: 'Rate',
+  rateDenominator: 'Rate',
+  maxOutputFromTokenConfig: 'Input limit',
+  campaign: 'Campaign',
+}
+
+/** Business-language labels for the setup authority states. The code stays in details. */
+export const TEAM_ADMIN_AUTHORITY_LABELS: Readonly<Record<string, string>> = {
+  EXPLICIT_SELECTION_CONFIRMED: 'Your campaign',
+  APPROVED_TEAM_UNAVAILABLE: 'No approved Team wallet configured',
+  NO_EXPLICIT_SELECTION: 'No campaign selected',
+  SELECTION_NOT_EFFECTIVE: 'Selected campaign not loaded',
+  CAMPAIGN_UNAVAILABLE: 'Campaign not readable',
+  CAMPAIGN_IDENTITY_MISMATCH: 'Campaign mismatch',
+  CAMPAIGN_ADMIN_MISMATCH: 'Not this Team’s campaign',
+  CAMPAIGN_NOT_INITIALIZED: 'Setup already closed',
+}
+
+/**
+ * Business-language labels for post-init mutation submit results. A busy refusal is
+ * classified FIRST (`ANOTHER_TEAM_ADMIN_MUTATION_IS_RUNNING` — the second action did not
+ * start), and whether anything was sent is read from the root's own `rawBroadcastCount`,
+ * never guessed from a code name. The exact code stays available in details.
+ */
+export function teamAdminMutationResultLabel(
+  code: string,
+  busy: boolean,
+  rawBroadcastCount: number,
+): string {
+  if (busy) {
+    return 'Another Team action is running'
+  }
+  switch (code) {
+    case 'MATCHING_IMMEDIATE_STATE_RESOLVED':
+    case 'LANDED_EXACT_POST_STATE_SUPERSEDED_RESOLVED':
+      return 'Saved on chain'
+    case 'FINALIZED_LANDED_FAILURE_RESOLVED':
+      return 'Failed on the network — nothing changed'
+    case 'WALLET_SIGN_ONLY_REFUSED':
+      return 'Not sent — approval declined'
+    case 'PAYER_SOL_INSUFFICIENT':
+      return 'Not sent — not enough devnet SOL'
+    case 'ATTEMPT_BLOCKED':
+      return 'Not sent — a saved action needs checking'
+    default:
+      return rawBroadcastCount === 1 ? 'Sent — check status' : 'Not sent'
+  }
 }
 
 // The copy for the output token's PERMANENT metadata: the THIRD visible Team/Admin

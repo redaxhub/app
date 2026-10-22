@@ -1,4 +1,6 @@
 
+import { RedaxPublicAddress } from '../components/RedaxPublicAddress'
+import { describeRedaxCampaignEnd, describeRedaxGrossCap } from '../lib/redaxCampaignFacts'
 import type { ReactNode } from 'react'
 import type {
   RedaxCampaignView,
@@ -314,7 +316,9 @@ export function HolderTrialScreen({
             {holderProfiles.length === 0 ? (
               <p className="note-line">
                 {isDevnetProgram
-                  ? `No on-chain holder registry exists, so this surface lists no holder personas — holder balances, eligibility, and input positions are not read in ${mode}; a connected wallet's own read-only holder context is resolved separately.`
+                  ? mode === 'DEVNET_TX_ENABLED'
+                    ? 'Connect your own wallet below: your balances for this campaign’s inputs are read from devnet for that wallet only. There is no list of other holders.'
+                    : `No on-chain holder registry exists, so this surface lists no holder personas — holder balances, eligibility, and input positions are not read in ${mode}; a connected wallet's own read-only holder context is resolved separately.`
                   : 'No holder profiles are available in this data source.'}
               </p>
             ) : null}
@@ -381,19 +385,45 @@ export function HolderTrialScreen({
               {displayFocusedTokenConfig ? (
                 <MetricRow
                   label="Conversion rate"
-                  value={`${displayFocusedTokenConfig.rateNumeratorRaw} : ${displayFocusedTokenConfig.rateDenominatorRaw}`}
-                  hint="output per accepted input, before decimal normalization"
+                  value={`${displayFocusedTokenConfig.rateDenominatorRaw} old → ${displayFocusedTokenConfig.rateNumeratorRaw} new (gross)`}
+                  hint="whole tokens: decimals are adjusted first, then this exact ratio, then the 1% fee"
+                />
+              ) : null}
+              {selectedCampaign.campaignAddress !== undefined ? (
+                <RedaxPublicAddress
+                  explorerCluster={environment?.cluster ?? null}
+                  hint="check this matches the address your campaign team gave you"
+                  kind="address"
+                  label="Campaign address"
+                  value={selectedCampaign.campaignAddress}
+                />
+              ) : null}
+              {isDevnetProgram ? (
+                <RedaxPublicAddress
+                  explorerCluster={environment?.cluster ?? null}
+                  hint="the token you receive; check it in your wallet after converting"
+                  kind="address"
+                  label="Output token mint"
+                  value={selectedCampaign.outputMint}
                 />
               ) : null}
               <MetricRow
                 label="Campaign window"
-                value={selectedRow ? formatCountdown(selectedRow.endsInSeconds) : '—'}
-                hint="conversions are rejected after the window closes"
+                value={
+                  selectedRow
+                    ? formatCountdown(selectedRow.endsInSeconds)
+                    : describeRedaxCampaignEnd(selectedCampaign.endTs, Date.now())
+                }
+                hint="conversions are rejected after the window closes (the network’s clock decides)"
               />
               <MetricRow
-                label="Cap utilization"
-                value={selectedRow ? capPercentLabel(selectedRow.capUtilizationBps) : '—'}
-                hint="output minted vs configured cap"
+                label="Campaign output limit (gross)"
+                value={
+                  selectedRow
+                    ? capPercentLabel(selectedRow.capUtilizationBps)
+                    : describeRedaxGrossCap(selectedCampaign.maxOutputSupplyRaw, selectedCampaign.totalOutputMintedRaw, 9)
+                }
+                hint="all holders together; not reserved for anyone"
               />
               <MetricRow
                 label="Proof completeness"

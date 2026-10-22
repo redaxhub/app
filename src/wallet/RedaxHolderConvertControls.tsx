@@ -66,6 +66,7 @@
 // identifier and no full signature rendered; no receipt-history / indexer or all-wallet
 // proof claim; no readiness claim.
 
+import { buildRedaxExplorerUrl } from '../lib/redaxPublicLinks'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useRedaxWallet } from './RedaxWalletProvider'
 import {
@@ -1360,6 +1361,27 @@ export interface RedaxHolderConvertControlsProps {
   activeCampaignId: string
 }
 
+/**
+ * Remaining GROSS output under one limit, as text: "Unlimited" for the program's 0, an
+ * exact amount otherwise, and "0 (limit reached)" when nothing remains. Display only.
+ */
+function describeRemainingGross(
+  capRaw: string,
+  mintedRaw: string,
+  decimals: number,
+  unit: string,
+): string {
+  const cap = parseRawAmount(capRaw)
+  if (cap === 0n) {
+    return 'Unlimited'
+  }
+  const minted = parseRawAmount(mintedRaw)
+  const remaining = cap > minted ? cap - minted : 0n
+  return remaining === 0n
+    ? `0 ${unit} (limit reached)`
+    : `${formatBaseUnits(remaining, decimals)} ${unit} of ${formatBaseUnits(cap, decimals)}`
+}
+
 export function RedaxHolderConvertControls({
   isDevnetTxEnabled,
   dataSource,
@@ -1738,10 +1760,16 @@ export function RedaxHolderConvertControls({
       ? focusedBalanceRow.balanceRaw
       : null
 
+  // THE DEVICE CLOCK, in whole seconds, read on EVERY render rather than once inside the
+  // memo below. The earlier reading — `Date.now()` evaluated once and frozen until the
+  // amount changed — is superseded, because every interaction (typing, the acknowledgement, a check)
+  // re-renders, and a window that closed while the form was open is then shown as closed.
+  // It is still the device's clock and is labelled as such; the program's own Clock is the
+  // only expiry authority, and nothing here can extend or shorten a window.
+  const previewNowSec = Math.floor(Date.now() / 1000)
+
   // Pure preview: parse the amount, then compute the quote + pre-burn blocks. Never
-  // signs, sends, or mutates, and it is never transaction authority. `Date.now()` is
-  // read once here for the window check — the preview is "as of now" and refreshes on
-  // the next amount change; the program remains the expiry authority.
+  // signs, sends, or mutates, and it is never transaction authority.
   const preview = useMemo<PreviewState>(() => {
     if (tokenConfig === null || campaign === null) {
       return { kind: 'idle' }
@@ -1758,7 +1786,7 @@ export function RedaxHolderConvertControls({
     if (selectedBalanceRaw !== null && amountIn > parseRawAmount(selectedBalanceRaw)) {
       return { kind: 'amount_error', error: 'over_balance' }
     }
-    const nowSec = Math.floor(Date.now() / 1000)
+    const nowSec = previewNowSec
     const statusBlocks: string[] = []
     if (campaign.programStatus !== 'active') {
       statusBlocks.push(CONVERT_PREVIEW_BLOCK_NOT_ACTIVE)
@@ -1795,7 +1823,7 @@ export function RedaxHolderConvertControls({
       )
     }
     return { kind: 'quote', amountIn, amounts: quote.amounts, blocks }
-  }, [amountInput, tokenConfig, campaign, selectedBalanceRaw])
+  }, [amountInput, tokenConfig, campaign, selectedBalanceRaw, previewNowSec])
 
   if (!isDevnetTxEnabled) {
     return null
@@ -1823,7 +1851,18 @@ export function RedaxHolderConvertControls({
     | { kind: 'output_unavailable' }
     | { kind: 'no_balance' }
     | { kind: 'balance_unavailable' }
-    | { kind: 'input'; balanceRaw: string; legacyDecimals: number }
+    | {
+        kind: 'input'
+        balanceRaw: string
+        legacyDecimals: number
+        /**
+         * The output token account is not prepared yet. The amount, the quote and every
+         * pre-burn block (caps, window, status) are still shown — a missing account must not
+         * hide WHY a conversion would be refused — but conversion stays disabled until the
+         * account is prepared.
+         */
+        outputAccountMissing: boolean
+      }
 
   let stage: ConvertStage
   if (!isConnected) {
@@ -1834,19 +1873,20 @@ export function RedaxHolderConvertControls({
     stage = { kind: 'no_token_config' }
   } else if (outputAtaStatus === 'mismatch') {
     stage = { kind: 'output_mismatch' }
-  } else if (outputAtaStatus !== 'exists') {
-    stage = outputAtaStatus === 'missing' ? { kind: 'prepare_first' } : { kind: 'output_unavailable' }
+  } else if (outputAtaStatus !== 'exists' && outputAtaStatus !== 'missing') {
+    stage = { kind: 'output_unavailable' }
   } else if (focusedBalanceRow === null || focusedBalanceRow.ataStatus === 'missing') {
     stage = { kind: 'no_balance' }
   } else if (focusedBalanceRow.ataStatus === 'mismatch' || focusedBalanceRow.ataStatus === 'unavailable') {
     stage = { kind: 'balance_unavailable' }
   } else if (focusedBalanceRow.balanceRaw === null || parseRawAmount(focusedBalanceRow.balanceRaw) <= 0n) {
-    stage = { kind: 'no_balance' }
+    stage = outputAtaStatus === 'missing' ? { kind: 'prepare_first' } : { kind: 'no_balance' }
   } else {
     stage = {
       kind: 'input',
       balanceRaw: focusedBalanceRow.balanceRaw,
       legacyDecimals: focusedBalanceRow.legacyDecimals,
+      outputAccountMissing: outputAtaStatus === 'missing',
     }
   }
 
@@ -2049,6 +2089,10 @@ export function RedaxHolderConvertControls({
     disabledReason = solPreflightBlock
   } else if (previewQuote !== null && previewQuote.blocks.length > 0) {
     disabledReason = CONVERT_ACTION_DISABLED_BLOCKED
+  } else if (outputAtaStatus !== 'exists') {
+    // Below the pre-burn blocks on purpose: a cap or window refusal is the reason a person
+    // needs to see first, and preparing an account would not clear it.
+    disabledReason = CONVERT_PREVIEW_PREPARE_FIRST
   } else if (!acknowledged) {
     disabledReason = CONVERT_ACTION_DISABLED_ACK
   } else if (!canConvertNow) {
@@ -2787,6 +2831,10 @@ export function RedaxHolderConvertControls({
     }
     const { receipt, matchesExpected } = card.view
     const receiptLegacyDecimals = tokenConfig?.legacyDecimals ?? 0
+    const receiptExplorerUrl =
+      receipt.identity?.kind === 'devnet-signature'
+        ? buildRedaxExplorerUrl('tx', receipt.identity.signature, 'devnet')
+        : null
     return (
       <div className="convert-panel__receipt">
         <div className="convert-panel__receipthead">
@@ -2815,6 +2863,14 @@ export function RedaxHolderConvertControls({
           value={`${formatBaseUnits(BigInt(receipt.userOutRaw), outputDecimals)} ${outputUnit}`}
           emphasis
         />
+        {receiptExplorerUrl !== null ? (
+          // The devnet explorer page for this exact conversion. The signature itself is not
+          // rendered as text here (this control shows signatures shortened only); the link
+          // carries it, so anyone can verify the conversion independently.
+          <a className="public-address__link" href={receiptExplorerUrl} rel="noopener noreferrer" target="_blank">
+            View this conversion on Solana Explorer (devnet)
+          </a>
+        ) : null}
         {!matchesExpected ? (
           <p className="convert-panel__receipthint convert-panel__receipthint--warn">
             {CONVERT_RECEIPT_MISMATCH}
@@ -3093,10 +3149,13 @@ export function RedaxHolderConvertControls({
       case 'balance_unavailable':
         return <p className="note-line">{CONVERT_PREVIEW_BALANCE_UNAVAILABLE}</p>
       case 'input': {
-        const { balanceRaw, legacyDecimals } = stage
+        const { balanceRaw, legacyDecimals, outputAccountMissing } = stage
         const balanceBaseUnits = parseRawAmount(balanceRaw)
         return (
           <div className="convert-panel__action">
+            {outputAccountMissing ? (
+              <p className="convert-panel__hint convert-panel__hint--warn">{CONVERT_PREVIEW_PREPARE_FIRST}</p>
+            ) : null}
             <label className="convert-panel__field">
               <span className="convert-panel__fieldlabel">
                 {CONVERT_PREVIEW_AMOUNT_LABEL} — {legacyLabel}
@@ -3175,6 +3234,30 @@ export function RedaxHolderConvertControls({
                   value={`${formatBaseUnits(preview.amounts.userOut, outputDecimals)} ${outputUnit}`}
                   emphasis
                 />
+                {campaign !== null && tokenConfig !== null ? (
+                  <>
+                    <MetricRow
+                      label="Campaign limit remaining (gross)"
+                      value={describeRemainingGross(
+                        campaign.maxOutputSupplyRaw,
+                        campaign.totalOutputMintedRaw,
+                        outputDecimals,
+                        outputUnit,
+                      )}
+                      hint="all holders together, as of the last read — not reserved for you"
+                    />
+                    <MetricRow
+                      label="This input's limit remaining (gross)"
+                      value={describeRemainingGross(
+                        tokenConfig.maxOutputFromTokenConfigRaw,
+                        tokenConfig.totalOutputMintedFromTokenConfigRaw,
+                        outputDecimals,
+                        outputUnit,
+                      )}
+                      hint="as of the last read — no partial fills; a conversion above it is refused before burn"
+                    />
+                  </>
+                ) : null}
                 {preview.amounts.normalizationRemainder > 0n ? (
                   <MetricRow
                     label="Normalization remainder"
@@ -3196,6 +3279,9 @@ export function RedaxHolderConvertControls({
             ) : null}
 
             <p className="convert-panel__warn">{CONVERT_PREVIEW_BURN_WARNING}</p>
+            <p className="note-line">
+              End-time checks here use this device&apos;s clock; the network&apos;s clock decides when the campaign stops accepting conversions.
+            </p>
 
             {preview.kind === 'quote' ? (
               <div className="convert-panel__actionblock">

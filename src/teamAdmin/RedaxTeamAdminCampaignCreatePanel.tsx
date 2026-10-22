@@ -39,14 +39,39 @@
 // something may have reached devnet, and this panel stops offering Campaign Create
 // altogether. It is not a retry surface and must never become one; the honest next step
 // is `Check submission status`, which signs nothing and sends nothing.
+//
+// DEMO CUSTOMER FLOW (2026-10-22). Four presentation rules above are superseded on the
+// points named here and on no other:
+//
+//   * HUMAN UNITS. The campaign output limit is typed in output tokens with an explicit
+//     "No limit" choice, and the end is a date-time with a visible time zone and an explicit
+//     "No end date" choice. Both are converted EXACTLY (BigInt over typed digits) to the same
+//     raw strings `submitS1` always took; nothing about the plan, the fingerprint or the
+//     instruction changed. A REVIEW freezes the converted values and an acknowledgement is
+//     required; any draft or identity change invalidates both, and an end time that passes
+//     during review is refused at click time before the wallet is asked.
+//   * FULL PUBLIC ADDRESSES. The created Campaign, its output mint and the resolved
+//     transaction signature are shown in full, copyable, with devnet explorer links and a
+//     holder link. They are public chain facts; wallets elsewhere may stay short.
+//   * LATE SUCCESS CONTINUES. `Check submission status` can now resolve a submission that
+//     finalized after the first observation (v2 records), and its result offers the same
+//     local navigation to the same Campaign — including after a reload, from the durable
+//     record. The navigation condition is still a proven matching-complete terminal and
+//     nothing weaker: `submitResult` exactly as before, or the action root's own
+//     `openableCampaign`, which the root sets only for that terminal.
+//   * ANOTHER CAMPAIGN. Once the saved attempt is resolved, `Start another campaign` clears
+//     this panel's local state so the next campaign can be prepared. It is local only; the
+//     action root still refuses a new attempt while any saved attempt is unresolved.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { MetricRow } from '../components/MetricRow'
+import { RedaxPublicAddress } from '../components/RedaxPublicAddress'
 import { StatusPill } from '../components/StatusPill'
 import { SurfaceCard } from '../components/SurfaceCard'
 import {
   TEAM_ADMIN_CAMPAIGN_CREATE,
+  TEAM_ADMIN_CREATE_TERMS,
   TEAM_ADMIN_OPEN_UNLISTED_WORKSPACE,
   TEAM_ADMIN_SOL_PREFLIGHT_INSUFFICIENT,
   TEAM_ADMIN_SOL_PREFLIGHT_READING,
@@ -54,8 +79,24 @@ import {
   TEAM_ADMIN_SOL_PREFLIGHT_SUBMIT_REFUSED,
   TEAM_ADMIN_SOL_PREFLIGHT_UNAVAILABLE,
 } from '../lib/productCopy'
-import type { TeamAdminCampaignCreateFieldId } from '../lib/productCopy'
-import { getTeamAdminWizardInputMode, validateTeamAdminWizardField } from '../lib/teamAdminWizardDraft'
+import {
+  REDAX_HUMAN_U128_MAX,
+  describeRedaxHumanAmountRefusal,
+  describeRedaxHumanDateTimeRefusal,
+  formatRedaxRawAmount,
+  formatRedaxUnixSecondsDevice,
+  formatRedaxUnixSecondsUtc,
+  groupRedaxRawDigits,
+  parseRedaxHumanDateTime,
+  parseRedaxHumanTokenAmount,
+  redaxDeviceTimeZoneName,
+  redaxDeviceUtcOffsetLabel,
+} from '../lib/redaxHumanUnits'
+import type { RedaxDateTimeZoneChoice } from '../lib/redaxHumanUnits'
+import { redaxAvailableMetadataPresets } from '../lib/redaxMetadataPresets'
+import type { RedaxPlannedMetadata } from '../lib/redaxMetadataPresets'
+import { buildRedaxCampaignShareUrl, readRedaxAppBaseUrl } from '../lib/redaxPublicLinks'
+import { validateTeamAdminWizardField } from '../lib/teamAdminWizardDraft'
 import type { TeamAdminWizardFieldValidation } from '../lib/teamAdminWizardDraft'
 import { useRedaxWallet } from '../wallet/RedaxWalletProvider'
 import { useRedaxTeamAdminActions } from './RedaxTeamAdminActions'
@@ -127,15 +168,141 @@ export function redaxTeamAdminCreateSolPreflightScope(
   return `${approvedTeamWallet ?? ''}|${connectedPublicKey ?? ''}`
 }
 
-/** The five planning inputs, held in this component's memory and nowhere else. */
-type CampaignCreateDraft = Record<TeamAdminCampaignCreateFieldId, string>
+/**
+ * The planning inputs, in HUMAN units, held in this component's memory and nowhere else.
+ *
+ * `capMode` and `endMode` start `null` on purpose: "no limit" and "no end date" are
+ * explicit choices, never what an empty field silently means.
+ */
+interface CampaignCreateDraft {
+  readonly capMode: 'LIMIT' | 'NONE' | null
+  /** Output tokens, as typed. Only read when `capMode === 'LIMIT'`. */
+  readonly capAmount: string
+  readonly endMode: 'AT' | 'NONE' | null
+  /** A `datetime-local` value. Only read when `endMode === 'AT'`. */
+  readonly endLocal: string
+  readonly endZone: RedaxDateTimeZoneChoice
+  readonly metadataName: string
+  readonly metadataSymbol: string
+  readonly metadataUri: string
+}
 
 const EMPTY_DRAFT: CampaignCreateDraft = {
-  endTs: '',
-  maxOutputSupply: '',
+  capMode: null,
+  capAmount: '',
+  endMode: null,
+  endLocal: '',
+  endZone: 'DEVICE',
   metadataName: '',
   metadataSymbol: '',
   metadataUri: '',
+}
+
+/** The Phase 1 output mint decimals every campaign output token carries. */
+const CREATE_OUTPUT_DECIMALS = 9
+
+/** The exact submit request a review froze, and what it was frozen against. */
+interface CampaignCreateReview {
+  readonly draftKey: string
+  readonly identityScope: string
+  readonly endTs: string
+  readonly maxOutputSupply: string
+  readonly capRaw: bigint | null
+  readonly endUnix: bigint | null
+  readonly metadataName: string
+  readonly metadataSymbol: string
+  readonly metadataUri: string
+}
+
+/** Planned metadata carried to the workspace as a prefill. Never a chain record. */
+export type RedaxTeamAdminPlannedMetadata = RedaxPlannedMetadata
+
+/**
+ * The planned metadata ONE create submission actually sent, bound to the campaign and output
+ * mint that same submission returned. It is the only form in which a plan leaves this panel:
+ * a recovered campaign is offered a plan only when its own address and output mint are the
+ * ones bound here. Memory only — a reload leaves none, and the workspace then opens with none.
+ */
+export interface RedaxTeamAdminSubmittedCreatePlan {
+  readonly campaign: string
+  readonly outputMint: string
+  readonly metadata: RedaxTeamAdminPlannedMetadata
+}
+
+/** One stable text key for a draft, so any edit invalidates a frozen review. */
+function campaignCreateDraftKey(draft: CampaignCreateDraft): string {
+  return JSON.stringify([
+    draft.capMode,
+    draft.capAmount,
+    draft.endMode,
+    draft.endLocal,
+    draft.endZone,
+    draft.metadataName,
+    draft.metadataSymbol,
+    draft.metadataUri,
+  ])
+}
+
+/** The converted terms, or the first human-readable reason they cannot be converted. */
+export type RedaxCampaignCreateTermsConversion =
+  | {
+      readonly ok: true
+      readonly endTs: string
+      readonly maxOutputSupply: string
+      readonly capRaw: bigint | null
+      readonly endUnix: bigint | null
+    }
+  | { readonly ok: false; readonly capIssue: string | null; readonly endIssue: string | null }
+
+/**
+ * Convert the human cap and end into the EXACT raw strings an S1 plan carries.
+ *
+ * Exported so the conversion the panel previews and the conversion it submits can be
+ * proven to be one function: there is no second converter anywhere.
+ */
+export function convertRedaxCampaignCreateTerms(
+  draft: Pick<CampaignCreateDraft, 'capMode' | 'capAmount' | 'endMode' | 'endLocal' | 'endZone'>,
+  nowMs: number,
+): RedaxCampaignCreateTermsConversion {
+  let capIssue: string | null = null
+  let capRaw: bigint | null = null
+  let maxOutputSupply = ''
+  if (draft.capMode === null) {
+    capIssue = TEAM_ADMIN_CREATE_TERMS.capChooseNote
+  } else if (draft.capMode === 'NONE') {
+    // The program's own encoding of "no campaign-wide limit".
+    maxOutputSupply = '0'
+  } else {
+    const parsed = parseRedaxHumanTokenAmount(
+      draft.capAmount,
+      CREATE_OUTPUT_DECIMALS,
+      REDAX_HUMAN_U128_MAX,
+    )
+    if (parsed.ok) {
+      capRaw = parsed.raw
+      maxOutputSupply = parsed.raw.toString()
+    } else {
+      capIssue = describeRedaxHumanAmountRefusal(parsed.refusal, CREATE_OUTPUT_DECIMALS)
+    }
+  }
+  let endIssue: string | null = null
+  let endUnix: bigint | null = null
+  let endTs = ''
+  if (draft.endMode === null) {
+    endIssue = TEAM_ADMIN_CREATE_TERMS.endChooseNote
+  } else if (draft.endMode === 'AT') {
+    const parsed = parseRedaxHumanDateTime(draft.endLocal, draft.endZone, nowMs)
+    if (parsed.ok) {
+      endUnix = parsed.unixSeconds
+      endTs = parsed.unixSeconds.toString()
+    } else {
+      endIssue = describeRedaxHumanDateTimeRefusal(parsed.refusal)
+    }
+  }
+  if (capIssue !== null || endIssue !== null) {
+    return { ok: false, capIssue, endIssue }
+  }
+  return { ok: true, endTs, maxOutputSupply, capRaw, endUnix }
 }
 
 /** Which operation, if any, is running. Rendered state beside the ref latch. */
@@ -172,11 +339,28 @@ export interface RedaxTeamAdminCampaignCreatePanelProps {
    * It is not an action-root capability, not a wallet capability, not a transaction, not
    * a recovery step and not a listing admission. It is optional: when it is absent the
    * control does not render at all, and everything else on this panel is unchanged.
+   *
+   * The second argument is the plan the submission that created THIS campaign sent, bound
+   * to its campaign and output mint, or null when this panel holds no such submission (a
+   * reload, or an attempt recovered from the saved record) — a PREFILL for the separate
+   * metadata step, never a chain fact.
    */
-  readonly onOpenUnlistedCampaignWorkspace?: (campaignId: string) => void
+  readonly onOpenUnlistedCampaignWorkspace?: (
+    campaignId: string,
+    submittedPlan: RedaxTeamAdminSubmittedCreatePlan | null,
+  ) => void
+  /** The cluster explorer links target. `null` renders no explorer link. */
+  readonly explorerCluster?: string | null
+  /** The deployment's approved metadata locations, for the ready-made identity choice. */
+  readonly metadataUriAllowlist?: readonly string[]
 }
 
-/** Shortened display form (4…4). The full address is never rendered by this panel. */
+/**
+ * Shortened display form (4…4), for WALLET addresses only. The created Campaign, its output
+ * mint and the resolved signature are public chain facts and are now shown in full (see the
+ * 2026-10-22 note above); the earlier "the full address is never rendered" reading is
+ * superseded on exactly those three values.
+ */
 function shortenAddress(value: string): string {
   return value.length <= 9 ? value : `${value.slice(0, 4)}…${value.slice(-4)}`
 }
@@ -268,7 +452,9 @@ export function describeRedaxTeamAdminSubmitCode(code: RedaxTeamAdminS1SubmitCod
     case 'SUBMITTED_TERMINAL_FAILURE':
       return 'The submission reached devnet and finalized as a failure. Nothing was created, and this attempt is resolved.'
     case 'SUBMITTED_OUTCOME_PENDING':
-      return 'The submission was sent and has not settled yet. This is not a failure, and nothing may be sent again — check the status later.'
+      return 'The submission was sent and has not been finalized yet. This is not a failure, and nothing may be sent again — use Check submission status in a few seconds.'
+    case 'SUBMITTED_OUTCOME_UNREADABLE':
+      return 'The submission was sent, but the network could not be read just now. Nothing is concluded and nothing is sent again — use Check submission status shortly.'
     case 'SUBMITTED_OUTCOME_UNRESOLVED_SUPPORT':
       return 'The submission was sent and could not be resolved automatically. It stays unresolved and blocking; a human decides what happens next.'
     case 'TERMINAL_RECORD_UNVERIFIED':
@@ -301,13 +487,19 @@ export function describeRedaxTeamAdminReconcileCode(
     case 'NOTHING_TO_RECONCILE':
       return 'No saved submission exists for this deployment. Nothing has been sent from here.'
     case 'ALREADY_RESOLVED':
-      return 'The saved submission is already resolved. There is nothing further to establish.'
+      return 'The saved submission is already resolved. There is nothing further to establish, and a new campaign can be prepared.'
     case 'NOT_INVOCATION_STARTED':
       return 'The saved attempt never reached the point of no return, so nothing was broadcast by it.'
     case 'SIGNATURE_UNKNOWN_UNRESOLVED':
       return 'The saved attempt has no transaction identity to reconcile against, so it stays unresolved.'
     case 'OUTCOME_PENDING':
-      return 'The submission has not settled yet. This is not a failure; it will be readable later, and nothing is sent again meanwhile.'
+      return 'The submission has not been finalized yet. This is not a failure; check again in a few seconds, and nothing is sent again meanwhile.'
+    case 'OUTCOME_UNREADABLE':
+      return 'The network could not be read just now. Nothing is concluded and nothing changed — check again shortly.'
+    case 'MATCHING_COMPLETE_STATE_RESOLVED':
+      return 'The submission finalized and the planned campaign was found complete on devnet. The saved attempt is now resolved — open the campaign below.'
+    case 'LEGACY_RECORD_SUCCESS_UNPROVABLE':
+      return 'The submission finalized, but this saved record was written by an earlier app version that did not store the expectations needed to prove the result here. It stays open; contact REDAX support. Nothing was sent.'
     case 'OUTCOME_UNRESOLVED_SUPPORT':
       return 'The submission could not be resolved automatically. It stays unresolved and blocking; a human decides what happens next.'
     case 'TERMINAL_FAILURE_RESOLVED':
@@ -329,18 +521,83 @@ export function describeRedaxTeamAdminReconcileCode(
   }
 }
 
+/**
+ * A short business-language label for a submit result. The exact code stays available.
+ * Whether anything was sent is read from the root's own `rawBroadcastCount`, never guessed
+ * from the code name.
+ */
+export function redaxTeamAdminS1SubmitLabel(
+  code: RedaxTeamAdminS1SubmitCode,
+  rawBroadcastCount: 0 | 1,
+): string {
+  switch (code) {
+    case 'SUBMITTED_MATCHING_COMPLETE_STATE':
+      return 'Campaign created'
+    case 'SUBMITTED_TERMINAL_FAILURE':
+      return 'Failed on the network — nothing created'
+    case 'SUBMITTED_OUTCOME_PENDING':
+      return 'Sent — waiting for finality'
+    case 'SUBMITTED_OUTCOME_UNREADABLE':
+      return 'Sent — result not readable yet'
+    case 'WALLET_SIGN_ONLY_REFUSED':
+      return 'Not sent — approval declined'
+    case 'PAYER_SOL_INSUFFICIENT':
+      return 'Not sent — not enough devnet SOL'
+    case 'ATTEMPT_BLOCKED':
+      return 'Not sent — a saved attempt needs checking'
+    default:
+      return rawBroadcastCount === 1 ? 'Sent — needs a status check' : 'Not sent'
+  }
+}
+
+/** A short business-language label for a status-check result. */
+export function redaxTeamAdminS1ReconcileLabel(code: RedaxTeamAdminS1ReconcileCode): string {
+  switch (code) {
+    case 'MATCHING_COMPLETE_STATE_RESOLVED':
+      return 'Campaign created'
+    case 'ALREADY_RESOLVED':
+      return 'Already resolved'
+    case 'NOTHING_TO_RECONCILE':
+      return 'Nothing saved'
+    case 'OUTCOME_PENDING':
+    case 'NOT_EXPIRED':
+      return 'Still pending'
+    case 'OUTCOME_UNREADABLE':
+      return 'Network not readable — check again'
+    case 'TERMINAL_FAILURE_RESOLVED':
+      return 'Failed on the network — resolved'
+    case 'FINALIZED_NO_LAND_RESOLVED':
+      return 'Never landed — resolved'
+    default:
+      return 'Needs attention'
+  }
+}
+
 export function RedaxTeamAdminCampaignCreatePanel({
   approvedTeamWallet,
   onOpenUnlistedCampaignWorkspace,
+  explorerCluster = null,
+  metadataUriAllowlist = [],
 }: RedaxTeamAdminCampaignCreatePanelProps) {
   const wallet = useRedaxWallet()
   const actions = useRedaxTeamAdminActions()
 
   const [draft, setDraft] = useState<CampaignCreateDraft>(EMPTY_DRAFT)
+  // The frozen review, and the human acknowledgement that belongs to it. Both are memory
+  // only, and both are invalidated by any draft or identity change (checked every render).
+  const [review, setReview] = useState<CampaignCreateReview | null>(null)
+  const [acknowledged, setAcknowledged] = useState<boolean>(false)
+  const [reviewNote, setReviewNote] = useState<string | null>(null)
   const [operation, setOperation] = useState<CampaignCreateOperation | null>(null)
   const [submitResult, setSubmitResult] = useState<RedaxTeamAdminS1SubmitResult | null>(null)
   const [reconcileResult, setReconcileResult] =
     useState<RedaxTeamAdminS1ReconcileResult | null>(null)
+  // The plan the last submission that crossed the point of no return SENT, bound to the
+  // campaign and output mint that submission returned. Written only by `handleCreate`, from
+  // its own frozen request and its own result — never from a later review, draft or preset.
+  const [submittedPlan, setSubmittedPlan] = useState<RedaxTeamAdminSubmittedCreatePlan | null>(
+    null,
+  )
 
   // The synchronous single-flight latch. Rendered state cannot serve alone: two clicks
   // inside one frame both observe the same `operation`, and both would pass a check
@@ -488,26 +745,41 @@ export function RedaxTeamAdminCampaignCreatePanel({
             ? TEAM_ADMIN_SOL_PREFLIGHT_UNAVAILABLE
             : null
 
-  const validations = useMemo((): Record<
-    TeamAdminCampaignCreateFieldId,
-    TeamAdminWizardFieldValidation | null
-  > => {
-    // The repository's own field policy, reused rather than restated: a second parser
-    // with slightly different bounds would be a second, quieter definition of valid.
+  // THE DEVICE CLOCK, read at render, used ONLY to say whether a chosen end is in the
+  // future. It is re-read on every render (each keystroke and each click), so the preview is
+  // never frozen at the first paint; the program's own Clock is what enforces the deadline.
+  const renderNowMs = Date.now()
+  const terms = convertRedaxCampaignCreateTerms(draft, renderNowMs)
+  const draftKey = campaignCreateDraftKey(draft)
+
+  const metadataValidations = useMemo((): {
+    readonly metadataName: TeamAdminWizardFieldValidation | null
+    readonly metadataSymbol: TeamAdminWizardFieldValidation | null
+    readonly metadataUri: TeamAdminWizardFieldValidation | null
+  } => {
+    // The repository's own field policy, reused rather than restated.
     return {
-      endTs: validateTeamAdminWizardField('endTs', draft.endTs),
-      maxOutputSupply: validateTeamAdminWizardField('maxOutputSupply', draft.maxOutputSupply),
       metadataName: validateTeamAdminWizardField('metadataName', draft.metadataName),
       metadataSymbol: validateTeamAdminWizardField('metadataSymbol', draft.metadataSymbol),
       metadataUri: validateTeamAdminWizardField('metadataUri', draft.metadataUri),
     }
-  }, [draft])
+  }, [draft.metadataName, draft.metadataSymbol, draft.metadataUri])
 
-  // A warning is a value the program would reject and blocks the action; a note is
-  // neutral information (`0 = uncapped`, an optional deadline) and blocks nothing.
-  const hasBlockingWarning = TEAM_ADMIN_CAMPAIGN_CREATE.fields.some(
-    (field) => validations[field.id]?.tone === 'warning',
-  )
+  // The converted raw values are ALSO judged by the repository's raw field policy, so the
+  // human layer can never hand the plan a value the raw policy would have refused.
+  const rawTermValidations: readonly (TeamAdminWizardFieldValidation | null)[] = terms.ok
+    ? [
+        validateTeamAdminWizardField('maxOutputSupply', terms.maxOutputSupply),
+        validateTeamAdminWizardField('endTs', terms.endTs),
+      ]
+    : []
+
+  const hasBlockingWarning =
+    !terms.ok ||
+    rawTermValidations.some((validation) => validation?.tone === 'warning') ||
+    Object.values(metadataValidations).some((validation) => validation?.tone === 'warning')
+
+  const availablePresets = redaxAvailableMetadataPresets(metadataUriAllowlist)
 
   const uxStatus = deriveRedaxTeamAdminCarrierUxStatus(
     approvedTeamWallet,
@@ -518,6 +790,9 @@ export function RedaxTeamAdminCampaignCreatePanel({
   // Create entirely — a second create would not be a retry, it would be a second campaign.
   const postBroadcast = submitResult?.rawBroadcastCount === 1
   const custodyOpen = actions.attempt.custodyPresent
+  // The review is CURRENT only for the exact draft and the exact identity it was taken for.
+  const reviewCurrent =
+    review !== null && review.draftKey === draftKey && review.identityScope === solPreflightScope
   // The ONE campaign address this panel may offer LOCAL NAVIGATION to, or null.
   //
   // All three facts are required and none is redundant. `ok` alone is not the terminal;
@@ -536,7 +811,58 @@ export function RedaxTeamAdminCampaignCreatePanel({
     submitResult.ok &&
     submitResult.code === 'SUBMITTED_MATCHING_COMPLETE_STATE'
       ? submitResult.campaign
+      : // THE LATE-SUCCESS PATH. The action root sets `openableCampaign` ONLY for the
+        // matching-complete terminal — reached now by this check, or already durable from an
+        // earlier one (a reload included) — so this inherits exactly the same condition.
+        reconcileResult !== null && reconcileResult.ok && reconcileResult.openableCampaign !== null
+        ? reconcileResult.openableCampaign
+        : null
+  // The plan carried to the workspace, as a prefill only: the one a submission from this
+  // panel SENT, and only for the campaign that submission returned — and, when the saved
+  // record is what proved the campaign, only if that record names the same output mint. The
+  // review on screen is never consulted: it may belong to a campaign nobody has sent, so a
+  // campaign recovered from the saved record after a reload is carried no plan at all.
+  const submittedPlanForWorkspace: RedaxTeamAdminSubmittedCreatePlan | null =
+    submittedPlan !== null &&
+    openableCampaignAddress !== null &&
+    submittedPlan.campaign === openableCampaignAddress &&
+    (reconcileResult === null ||
+      reconcileResult.openableCampaign !== openableCampaignAddress ||
+      reconcileResult.outputMint === submittedPlan.outputMint)
+      ? submittedPlan
       : null
+  // The output mint and signature that belong to that SAME proven terminal, for display.
+  const openableOutputMint: string | null =
+    openableCampaignAddress === null
+      ? null
+      : submitResult !== null && submitResult.campaign === openableCampaignAddress
+        ? submitResult.outputMint
+        : reconcileResult?.outputMint ?? null
+  const openableSignature: string | null =
+    openableCampaignAddress === null
+      ? null
+      : submitResult !== null &&
+          submitResult.ok &&
+          submitResult.campaign === openableCampaignAddress
+        ? submitResult.resolvedSignature
+        : reconcileResult?.resolvedSignature ?? null
+  const appBaseUrl = readRedaxAppBaseUrl()
+  const holderLink =
+    openableCampaignAddress !== null && appBaseUrl !== null
+      ? buildRedaxCampaignShareUrl(appBaseUrl, openableCampaignAddress)
+      : null
+  // A RESOLVED saved attempt is the only state from which another campaign may be prepared
+  // here. Local state only — the action root refuses a new attempt on its own regardless.
+  const savedAttemptResolved =
+    (submitResult !== null &&
+      (submitResult.code === 'SUBMITTED_MATCHING_COMPLETE_STATE' ||
+        submitResult.code === 'SUBMITTED_TERMINAL_FAILURE')) ||
+    (reconcileResult !== null &&
+      (reconcileResult.code === 'MATCHING_COMPLETE_STATE_RESOLVED' ||
+        reconcileResult.code === 'TERMINAL_FAILURE_RESOLVED' ||
+        reconcileResult.code === 'FINALIZED_NO_LAND_RESOLVED' ||
+        reconcileResult.code === 'ALREADY_RESOLVED' ||
+        reconcileResult.code === 'NOTHING_TO_RECONCILE'))
 
   const canSubmit =
     approvedTeamWallet !== null &&
@@ -546,6 +872,10 @@ export function RedaxTeamAdminCampaignCreatePanel({
     !busy &&
     !custodyOpen &&
     !postBroadcast &&
+    // A frozen, current review and its acknowledgement — the person saw the exact permanent
+    // terms that will be sent, and nothing has changed since.
+    reviewCurrent &&
+    acknowledged &&
     // The action is not EXPOSED unless the payer balance is KNOWN to be enough. A reading,
     // an idle projection, an INSUFFICIENT result and a READ_UNAVAILABLE result each
     // withhold it; every existing validation, busy, custody and post-broadcast condition
@@ -557,8 +887,52 @@ export function RedaxTeamAdminCampaignCreatePanel({
   // operator has the least and needs it most. It cannot sign, prompt or send.
   const canReconcile = approvedTeamWallet !== null && !busy
 
-  const updateField = useCallback((id: TeamAdminCampaignCreateFieldId, value: string): void => {
-    setDraft((current) => ({ ...current, [id]: value }))
+  const updateDraft = useCallback((patch: Partial<CampaignCreateDraft>): void => {
+    setDraft((current) => ({ ...current, ...patch }))
+    setReviewNote(null)
+  }, [])
+
+  /**
+   * THE REVIEW. Converts once, freezes the exact request, and asks for an acknowledgement.
+   * It signs nothing, sends nothing, opens no wallet and reads no network.
+   */
+  const handleReview = useCallback((): void => {
+    const converted = convertRedaxCampaignCreateTerms(draft, Date.now())
+    if (!converted.ok || hasBlockingWarning) {
+      setReview(null)
+      setAcknowledged(false)
+      setReviewNote(TEAM_ADMIN_CREATE_TERMS.reviewBlockedNote)
+      return
+    }
+    setReview({
+      draftKey: campaignCreateDraftKey(draft),
+      identityScope: solPreflightScope,
+      endTs: converted.endTs,
+      maxOutputSupply: converted.maxOutputSupply,
+      capRaw: converted.capRaw,
+      endUnix: converted.endUnix,
+      metadataName: draft.metadataName,
+      metadataSymbol: draft.metadataSymbol,
+      metadataUri: draft.metadataUri,
+    })
+    setAcknowledged(false)
+    setReviewNote(null)
+  }, [draft, hasBlockingWarning, solPreflightScope])
+
+  /**
+   * Local only: clears this panel so the next campaign can be prepared. The submitted plan is
+   * kept: it is bound to its own campaign, so it can only ever be offered for that campaign.
+   */
+  const handleStartAnother = useCallback((): void => {
+    if (inFlightRef.current !== null) {
+      return
+    }
+    setDraft(EMPTY_DRAFT)
+    setReview(null)
+    setAcknowledged(false)
+    setReviewNote(null)
+    setSubmitResult(null)
+    setReconcileResult(null)
   }, [])
 
   const handleCreate = useCallback(async (): Promise<void> => {
@@ -584,25 +958,51 @@ export function RedaxTeamAdminCampaignCreatePanel({
     ) {
       return
     }
+    // THE FROZEN REVIEW IS WHAT IS SENT, re-checked here against the current draft and
+    // identity, and — because a review can sit open — against the clock: an end time that
+    // has passed while the person read the review is refused before the wallet is asked.
+    const frozen = review
+    if (frozen === null || frozen.draftKey !== draftKey || frozen.identityScope !== solPreflightScope) {
+      return
+    }
+    if (frozen.endUnix !== null && BigInt(Math.floor(Date.now() / 1000)) >= frozen.endUnix) {
+      setReview(null)
+      setAcknowledged(false)
+      setReviewNote(TEAM_ADMIN_CREATE_TERMS.endPassedDuringReviewNote)
+      return
+    }
     inFlightRef.current = 'submit'
     setOperation('submit')
     setReconcileResult(null)
     try {
       const result = await actions.submitS1({
-        endTs: draft.endTs,
-        maxOutputSupply: draft.maxOutputSupply,
-        metadataName: draft.metadataName,
-        metadataSymbol: draft.metadataSymbol,
-        metadataUri: draft.metadataUri,
+        endTs: frozen.endTs,
+        maxOutputSupply: frozen.maxOutputSupply,
+        metadataName: frozen.metadataName,
+        metadataSymbol: frozen.metadataSymbol,
+        metadataUri: frozen.metadataUri,
         lifecycleIntent: 'remain_initialized',
         tokenConfigs: [],
       })
       setSubmitResult(result)
+      // Bound only when THIS call crossed the point of no return and named its own campaign
+      // and output mint. The metadata is the frozen request it sent, not whatever is on screen.
+      if (result.rawBroadcastCount === 1 && result.campaign !== null && result.outputMint !== null) {
+        setSubmittedPlan({
+          campaign: result.campaign,
+          outputMint: result.outputMint,
+          metadata: {
+            name: frozen.metadataName,
+            symbol: frozen.metadataSymbol,
+            uri: frozen.metadataUri,
+          },
+        })
+      }
     } finally {
       inFlightRef.current = null
       setOperation(null)
     }
-  }, [actions, canSubmit, draft, solPreflightScope, solPreflightSufficient])
+  }, [actions, canSubmit, draftKey, review, solPreflightScope, solPreflightSufficient])
 
   /**
    * THE EXPLICIT, READ-ONLY SOL RE-CHECK. It runs ONLY from the button click below.
@@ -731,43 +1131,193 @@ export function RedaxTeamAdminCampaignCreatePanel({
 
         <div className="wizard-preview__step">
           <p className="wizard-preview__header">{TEAM_ADMIN_CAMPAIGN_CREATE.fieldsTitle}</p>
+          <p className="wizard-preview__purpose">{TEAM_ADMIN_CREATE_TERMS.permanenceNote}</p>
           <div className="wizard-preview__fields">
-            {TEAM_ADMIN_CAMPAIGN_CREATE.fields.map((field) => {
-              const validation = validations[field.id]
-              const inputId = `redax-team-create-${field.id}`
-              return (
-                <div className="wizard-preview__field" key={field.id}>
-                  <label className="wizard-preview__fieldname" htmlFor={inputId}>
-                    {field.label}
-                  </label>
-                  <div className="wizard-preview__fieldbody">
+            <fieldset className="wizard-preview__field human-terms" disabled={busy || postBroadcast}>
+              <legend className="wizard-preview__fieldname">{TEAM_ADMIN_CREATE_TERMS.capLegend}</legend>
+              <div className="wizard-preview__fieldbody">
+                <label className="human-terms__choice">
+                  <input
+                    checked={draft.capMode === 'LIMIT'}
+                    name="redax-team-create-cap-mode"
+                    onChange={() => updateDraft({ capMode: 'LIMIT' })}
+                    type="radio"
+                  />
+                  {TEAM_ADMIN_CREATE_TERMS.capLimitChoice}
+                </label>
+                <label className="human-terms__choice">
+                  <input
+                    checked={draft.capMode === 'NONE'}
+                    name="redax-team-create-cap-mode"
+                    onChange={() => updateDraft({ capMode: 'NONE' })}
+                    type="radio"
+                  />
+                  {TEAM_ADMIN_CREATE_TERMS.capNoneChoice}
+                </label>
+                {draft.capMode === 'LIMIT' ? (
+                  <>
+                    <label className="wizard-preview__fieldname" htmlFor="redax-team-create-cap-amount">
+                      {TEAM_ADMIN_CREATE_TERMS.capAmountLabel}
+                    </label>
                     <input
                       className="wizard-preview__input"
-                      disabled={busy || postBroadcast}
-                      id={inputId}
-                      inputMode={getTeamAdminWizardInputMode(field.id)}
+                      id="redax-team-create-cap-amount"
+                      inputMode="decimal"
                       onChange={(event) => {
-                        updateField(field.id, event.target.value)
+                        updateDraft({ capAmount: (event.target as unknown as { readonly value: string }).value })
                       }}
+                      placeholder="30"
                       type="text"
-                      value={draft[field.id]}
+                      value={draft.capAmount}
                     />
-                    <p className="wizard-preview__fieldnote">{field.note}</p>
-                    {validation ? (
-                      <p
-                        className={
-                          validation.tone === 'warning'
-                            ? 'wizard-preview__fieldwarning'
-                            : 'wizard-preview__fieldhint'
-                        }
+                  </>
+                ) : null}
+                <p className="wizard-preview__fieldnote">{TEAM_ADMIN_CREATE_TERMS.capNote}</p>
+                {terms.ok ? (
+                  <p className="wizard-preview__fieldhint">
+                    {terms.capRaw === null
+                      ? TEAM_ADMIN_CREATE_TERMS.capNoneSummary
+                      : `= ${formatRedaxRawAmount(terms.capRaw, CREATE_OUTPUT_DECIMALS)} new tokens · ${groupRedaxRawDigits(terms.capRaw)} base units (${CREATE_OUTPUT_DECIMALS} decimals)`}
+                  </p>
+                ) : terms.capIssue !== null ? (
+                  <p className="wizard-preview__fieldwarning">{terms.capIssue}</p>
+                ) : null}
+              </div>
+            </fieldset>
+
+            <fieldset className="wizard-preview__field human-terms" disabled={busy || postBroadcast}>
+              <legend className="wizard-preview__fieldname">{TEAM_ADMIN_CREATE_TERMS.endLegend}</legend>
+              <div className="wizard-preview__fieldbody">
+                <label className="human-terms__choice">
+                  <input
+                    checked={draft.endMode === 'NONE'}
+                    name="redax-team-create-end-mode"
+                    onChange={() => updateDraft({ endMode: 'NONE' })}
+                    type="radio"
+                  />
+                  {TEAM_ADMIN_CREATE_TERMS.endNoneChoice}
+                </label>
+                <label className="human-terms__choice">
+                  <input
+                    checked={draft.endMode === 'AT'}
+                    name="redax-team-create-end-mode"
+                    onChange={() => updateDraft({ endMode: 'AT' })}
+                    type="radio"
+                  />
+                  {TEAM_ADMIN_CREATE_TERMS.endAtChoice}
+                </label>
+                {draft.endMode === 'AT' ? (
+                  <>
+                    <label className="wizard-preview__fieldname" htmlFor="redax-team-create-end-local">
+                      {TEAM_ADMIN_CREATE_TERMS.endDateTimeLabel}
+                    </label>
+                    <input
+                      className="wizard-preview__input"
+                      id="redax-team-create-end-local"
+                      onChange={(event) => {
+                        updateDraft({ endLocal: (event.target as unknown as { readonly value: string }).value })
+                      }}
+                      step={60}
+                      type="datetime-local"
+                      value={draft.endLocal}
+                    />
+                    <p className="wizard-preview__fieldname">{TEAM_ADMIN_CREATE_TERMS.endZoneLabel}</p>
+                    {/*
+                      Two plain choices rather than a drop-down: a closed drop-down truncates the
+                      device zone on a narrow screen, and the chosen zone must stay readable.
+                    */}
+                    <label className="human-terms__choice">
+                      <input
+                        checked={draft.endZone === 'DEVICE'}
+                        name="redax-team-create-end-zone"
+                        onChange={() => updateDraft({ endZone: 'DEVICE' })}
+                        type="radio"
+                      />
+                      {`This device — ${redaxDeviceTimeZoneName()} (${redaxDeviceUtcOffsetLabel(renderNowMs)})`}
+                    </label>
+                    <label className="human-terms__choice">
+                      <input
+                        checked={draft.endZone === 'UTC'}
+                        name="redax-team-create-end-zone"
+                        onChange={() => updateDraft({ endZone: 'UTC' })}
+                        type="radio"
+                      />
+                      UTC
+                    </label>
+                  </>
+                ) : null}
+                <p className="wizard-preview__fieldnote">{TEAM_ADMIN_CREATE_TERMS.endNote}</p>
+                {terms.ok ? (
+                  <p className="wizard-preview__fieldhint">
+                    {terms.endUnix === null
+                      ? TEAM_ADMIN_CREATE_TERMS.endNoneSummary
+                      : `= ${formatRedaxUnixSecondsDevice(terms.endUnix)} · ${formatRedaxUnixSecondsUtc(terms.endUnix)} · Unix ${terms.endUnix.toString()} s`}
+                  </p>
+                ) : terms.endIssue !== null ? (
+                  <p className="wizard-preview__fieldwarning">{terms.endIssue}</p>
+                ) : null}
+              </div>
+            </fieldset>
+
+            <fieldset className="wizard-preview__field human-terms" disabled={busy || postBroadcast}>
+              <legend className="wizard-preview__fieldname">{TEAM_ADMIN_CREATE_TERMS.metadataLegend}</legend>
+              <div className="wizard-preview__fieldbody">
+                {availablePresets.length > 0 ? (
+                  <div className="human-terms__presets">
+                    <p className="wizard-preview__fieldnote">{TEAM_ADMIN_CREATE_TERMS.presetNote}</p>
+                    {availablePresets.map((preset) => (
+                      <button
+                        className="wallet-badge__btn"
+                        key={preset.key}
+                        onClick={() => {
+                          updateDraft({
+                            metadataName: preset.name,
+                            metadataSymbol: preset.symbol,
+                            metadataUri: preset.uri,
+                          })
+                        }}
+                        type="button"
                       >
-                        {validation.message}
-                      </p>
-                    ) : null}
+                        {`Use ${preset.label} (${preset.symbol})`}
+                      </button>
+                    ))}
                   </div>
-                </div>
-              )
-            })}
+                ) : null}
+                {(['metadataName', 'metadataSymbol', 'metadataUri'] as const).map((id) => {
+                  const fieldCopy = TEAM_ADMIN_CAMPAIGN_CREATE.fields.find((field) => field.id === id)
+                  const validation = metadataValidations[id]
+                  const inputId = `redax-team-create-${id}`
+                  return (
+                    <div className="human-terms__row" key={id}>
+                      <label className="wizard-preview__fieldname" htmlFor={inputId}>
+                        {fieldCopy?.label ?? id}
+                      </label>
+                      <input
+                        className="wizard-preview__input"
+                        id={inputId}
+                        onChange={(event) => {
+                          updateDraft({ [id]: (event.target as unknown as { readonly value: string }).value })
+                        }}
+                        spellCheck={false}
+                        type="text"
+                        value={draft[id]}
+                      />
+                      {validation ? (
+                        <p
+                          className={
+                            validation.tone === 'warning'
+                              ? 'wizard-preview__fieldwarning'
+                              : 'wizard-preview__fieldhint'
+                          }
+                        >
+                          {validation.message}
+                        </p>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            </fieldset>
           </div>
           <p className="wizard-preview__draftnotice">
             {TEAM_ADMIN_CAMPAIGN_CREATE.metadataNotice}
@@ -782,6 +1332,62 @@ export function RedaxTeamAdminCampaignCreatePanel({
             ))}
           </ul>
         </div>
+
+        {!postBroadcast ? (
+          <div className="wizard-preview__step">
+            <p className="wizard-preview__header">{TEAM_ADMIN_CREATE_TERMS.reviewTitle}</p>
+            <button
+              className="wallet-badge__btn"
+              disabled={busy || hasBlockingWarning}
+              onClick={handleReview}
+              type="button"
+            >
+              {TEAM_ADMIN_CREATE_TERMS.reviewLabel}
+            </button>
+            {reviewNote !== null ? <p className="wizard-preview__fieldwarning">{reviewNote}</p> : null}
+            {review !== null && !reviewCurrent ? (
+              <p className="wizard-preview__fieldwarning">{TEAM_ADMIN_CREATE_TERMS.reviewStaleNote}</p>
+            ) : null}
+            {review !== null && reviewCurrent ? (
+              <div className="human-terms__review">
+                <MetricRow label="Network" value="Solana devnet" />
+                <MetricRow
+                  label={TEAM_ADMIN_CREATE_TERMS.reviewCapLabel}
+                  value={
+                    review.capRaw === null
+                      ? 'No limit'
+                      : `${formatRedaxRawAmount(review.capRaw, CREATE_OUTPUT_DECIMALS)} new tokens`
+                  }
+                  hint={`plan value max_output_supply = ${review.maxOutputSupply}`}
+                />
+                <MetricRow
+                  label={TEAM_ADMIN_CREATE_TERMS.reviewEndLabel}
+                  value={
+                    review.endUnix === null
+                      ? 'No end date'
+                      : `${formatRedaxUnixSecondsDevice(review.endUnix)} · ${formatRedaxUnixSecondsUtc(review.endUnix)}`
+                  }
+                  hint={review.endUnix === null ? 'plan value end_ts = none' : `plan value end_ts = ${review.endTs}`}
+                />
+                <MetricRow
+                  label={TEAM_ADMIN_CREATE_TERMS.reviewPlannedLabel}
+                  value={`${review.metadataName} (${review.metadataSymbol})`}
+                  hint="planned only — the metadata step is separate and has its own review"
+                />
+                <label className="human-terms__ack">
+                  <input
+                    checked={acknowledged}
+                    onChange={(event) => {
+                      setAcknowledged((event.target as unknown as { readonly checked: boolean }).checked)
+                    }}
+                    type="checkbox"
+                  />
+                  {TEAM_ADMIN_CREATE_TERMS.acknowledgeLabel}
+                </label>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="wizard-preview__stepfoot">
           {postBroadcast ? (
@@ -857,7 +1463,7 @@ export function RedaxTeamAdminCampaignCreatePanel({
             </p>
             <div className="wizard-preview__stephead">
               <StatusPill
-                label={submitResult.code}
+                label={redaxTeamAdminS1SubmitLabel(submitResult.code, submitResult.rawBroadcastCount)}
                 tone={
                   submitResult.code === 'SUBMITTED_MATCHING_COMPLETE_STATE'
                     ? 'positive'
@@ -870,43 +1476,102 @@ export function RedaxTeamAdminCampaignCreatePanel({
             <p className="wizard-preview__purpose">
               {describeRedaxTeamAdminSubmitCode(submitResult.code)}
             </p>
-            {submitResult.campaign ? (
+            {submitResult.campaign && openableCampaignAddress !== submitResult.campaign ? (
               <MetricRow
-                label={TEAM_ADMIN_CAMPAIGN_CREATE.resultCampaignLabel}
-                value={shortenAddress(submitResult.campaign)}
-                hint="a public devnet address — not a readiness or product claim"
+                label="Planned campaign address"
+                value={submitResult.campaign}
+                hint="the address this submission planned — not proof that it exists yet"
               />
             ) : null}
-            {submitResult.outputMint ? (
+            <details className="technical-details">
+              <summary>Technical details</summary>
+              <MetricRow label="Result code" value={submitResult.code} />
+              {submitResult.planFingerprint ? (
+                <MetricRow
+                  label={TEAM_ADMIN_CAMPAIGN_CREATE.resultFingerprintLabel}
+                  value={shortenAddress(submitResult.planFingerprint)}
+                  hint="the fingerprint of the submitted plan"
+                />
+              ) : null}
+            </details>
+          </div>
+        ) : null}
+
+        {reconcileResult ? (
+          <div className="wizard-preview__step">
+            <p className="wizard-preview__header">{TEAM_ADMIN_CAMPAIGN_CREATE.reconcileLabel}</p>
+            <div className="wizard-preview__stephead">
+              <StatusPill
+                label={redaxTeamAdminS1ReconcileLabel(reconcileResult.code)}
+                tone={reconcileResult.openableCampaign !== null ? 'positive' : 'neutral'}
+              />
+            </div>
+            <p className="wizard-preview__purpose">
+              {describeRedaxTeamAdminReconcileCode(reconcileResult.code)}
+            </p>
+            {reconcileResult.campaign !== null && reconcileResult.openableCampaign === null ? (
               <MetricRow
-                label={TEAM_ADMIN_CAMPAIGN_CREATE.resultOutputMintLabel}
-                value={shortenAddress(submitResult.outputMint)}
-                hint="the campaign's output mint; no metadata was applied to it"
+                label="Saved attempt's planned campaign"
+                value={reconcileResult.campaign}
+                hint="from the saved record — not proof that it exists"
               />
             ) : null}
-            {submitResult.planFingerprint ? (
-              <MetricRow
-                label={TEAM_ADMIN_CAMPAIGN_CREATE.resultFingerprintLabel}
-                value={shortenAddress(submitResult.planFingerprint)}
-                hint="the fingerprint of the submitted plan"
+            <details className="technical-details">
+              <summary>Technical details</summary>
+              <MetricRow label="Result code" value={reconcileResult.code} />
+            </details>
+          </div>
+        ) : null}
+
+        {/*
+          THE PROVEN CAMPAIGN — full public identities, copy, explorer and holder link — and
+          LOCAL NAVIGATION, ONLY ON THE ONE SAFE TERMINAL. `openableCampaignAddress` is non-null
+          only for a submit that reported `ok` + matching-complete, or for the action root's own
+          `openableCampaign`, which it sets only for that terminal. The handler calls the
+          callback and nothing else.
+        */}
+        {openableCampaignAddress !== null ? (
+          <div className="wizard-preview__step created-campaign">
+            <p className="wizard-preview__header">{TEAM_ADMIN_CREATE_TERMS.createdTitle}</p>
+            <RedaxPublicAddress
+              explorerCluster={explorerCluster}
+              hint="the Campaign account — share this with holders"
+              kind="address"
+              label="Campaign address"
+              value={openableCampaignAddress}
+            />
+            {openableOutputMint !== null ? (
+              <RedaxPublicAddress
+                explorerCluster={explorerCluster}
+                hint="the new output token (9 decimals); no metadata yet"
+                kind="address"
+                label="Output token mint"
+                value={openableOutputMint}
               />
             ) : null}
-            {/*
-              LOCAL NAVIGATION, AND ONLY ON THE ONE SAFE TERMINAL.
-              All five conditions are required and none is redundant: `ok`, the exact
-              matching-complete code, a non-null campaign address, and a caller that
-              actually supplied the callback. A non-null campaign on a pending, unresolved,
-              failed or unverified terminal is NOT enough — those results can carry an
-              address without having established that a campaign is there to open, and
-              offering navigation on one would present an unproven outcome as a finished
-              one. The handler below calls the callback and nothing else.
-            */}
+            {openableSignature !== null ? (
+              <RedaxPublicAddress
+                explorerCluster={explorerCluster}
+                kind="tx"
+                label="Create transaction"
+                value={openableSignature}
+              />
+            ) : null}
+            {holderLink !== null ? (
+              <RedaxPublicAddress
+                explorerCluster={null}
+                hint="opens this app with the address filled in; holders still choose to open it"
+                kind="link"
+                label="Holder link"
+                value={holderLink}
+              />
+            ) : null}
             {openableCampaignAddress !== null && onOpenUnlistedCampaignWorkspace !== undefined ? (
               <div className="wizard-preview__policy">
                 <button
                   className="wallet-badge__btn"
                   onClick={() => {
-                    onOpenUnlistedCampaignWorkspace(openableCampaignAddress)
+                    onOpenUnlistedCampaignWorkspace(openableCampaignAddress, submittedPlanForWorkspace)
                   }}
                   type="button"
                 >
@@ -920,15 +1585,12 @@ export function RedaxTeamAdminCampaignCreatePanel({
           </div>
         ) : null}
 
-        {reconcileResult ? (
-          <div className="wizard-preview__step">
-            <p className="wizard-preview__header">{TEAM_ADMIN_CAMPAIGN_CREATE.reconcileLabel}</p>
-            <div className="wizard-preview__stephead">
-              <StatusPill label={reconcileResult.code} tone="neutral" />
-            </div>
-            <p className="wizard-preview__purpose">
-              {describeRedaxTeamAdminReconcileCode(reconcileResult.code)}
-            </p>
+        {savedAttemptResolved && postBroadcast ? (
+          <div className="wizard-preview__policy">
+            <button className="wallet-badge__btn" disabled={busy} onClick={handleStartAnother} type="button">
+              {TEAM_ADMIN_CREATE_TERMS.startAnotherLabel}
+            </button>
+            <p className="wizard-preview__fieldnote">{TEAM_ADMIN_CREATE_TERMS.startAnotherHelp}</p>
           </div>
         ) : null}
 

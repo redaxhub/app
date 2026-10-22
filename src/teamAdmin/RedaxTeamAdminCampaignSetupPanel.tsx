@@ -67,21 +67,44 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { MetricRow } from '../components/MetricRow'
 import { StatusPill } from '../components/StatusPill'
 import { SurfaceCard } from '../components/SurfaceCard'
+import { RedaxPublicAddress } from '../components/RedaxPublicAddress'
+import { isCanonicalRedaxPublicKey } from '../config/redaxEnv'
+import { formatRedaxRawAmount } from '../lib/redaxHumanUnits'
+import {
+  EMPTY_REDAX_TEAM_ADMIN_TOKEN_CONFIG_HUMAN_DRAFT,
+  convertRedaxTeamAdminTokenConfigHumanDraft,
+  exampleRedaxTeamAdminTokenConfigQuote,
+  redaxTeamAdminTokenConfigReviewKey,
+} from './redaxTeamAdminTokenConfigHumanDraft'
+import type {
+  RedaxTeamAdminTokenConfigHumanDraft,
+  RedaxTeamAdminTokenConfigReviewBinding,
+} from './redaxTeamAdminTokenConfigHumanDraft'
 import {
   TEAM_ADMIN_ADD_TOKEN_CONFIG,
+  TEAM_ADMIN_AUTHORITY_LABELS,
+  TEAM_ADMIN_TOKEN_CONFIG_FIELD_NAMES,
+  TEAM_ADMIN_TOKEN_CONFIG_TERMS,
+  teamAdminMutationResultLabel,
   TEAM_ADMIN_SOL_PREFLIGHT_INSUFFICIENT,
   TEAM_ADMIN_SOL_PREFLIGHT_READING,
   TEAM_ADMIN_SOL_PREFLIGHT_RECHECK_LABEL,
   TEAM_ADMIN_SOL_PREFLIGHT_UNAVAILABLE,
   TEAM_ADMIN_SOL_PREFLIGHT_SUBMIT_REFUSED,
 } from '../lib/productCopy'
-import type { TeamAdminAddTokenConfigFieldId } from '../lib/productCopy'
 import { useRedaxWallet } from '../wallet/RedaxWalletProvider'
 import type { RedaxCampaignView, RedaxTokenConfigView } from '../data/redaxViewModels'
+import {
+  isRedaxTeamAdminVerifiedResolutionCode,
+  runRedaxTeamAdminStatusGestureSerialized,
+  useRedaxTeamAdminWorkspaceCheck,
+} from './redaxTeamAdminWorkspaceRefresh'
+import type { RedaxTeamAdminWorkspaceCheckRequest } from './redaxTeamAdminWorkspaceRefresh'
 import { useRedaxTeamAdminMutationActions } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationSolPreflightResult } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationOperation } from './redaxTeamAdminMutationIdentity'
 import type {
+  RedaxTeamAdminClassicMintFactsResult,
   RedaxTeamAdminMutationReconcileCode,
   RedaxTeamAdminMutationStatusReadCode,
   RedaxTeamAdminMutationStatusReadResult,
@@ -115,6 +138,19 @@ const REDAX_OUTPUT_DECIMALS_FALLBACK = 9
 type SetupPanelOperation = 'submit' | 'status'
 
 export interface RedaxTeamAdminCampaignSetupPanelProps {
+  /**
+   * A workspace-wide check request (demo customer flow, 2026-10-22). When its sequence is
+   * new and it names this panel's selected campaign, this panel runs its OWN existing
+   * status gesture once — serialized with the other panels. Optional; absent means never.
+   */
+  readonly workspaceCheck?: RedaxTeamAdminWorkspaceCheckRequest | null
+  /**
+   * Told the campaign id after THIS panel saw a mutation VERIFIED and RESOLVED just now, so
+   * the workspace can refresh the dependent panels once. Never called for any other result.
+   */
+  readonly onVerifiedChainChange?: (campaignId: string) => void
+  /** The cluster explorer links target. `null` renders no explorer link. */
+  readonly explorerCluster?: string | null
   /**
    * The ONE canonical approved Team wallet, resolved once in App.
    *
@@ -323,6 +359,34 @@ export async function runRedaxTeamAdminSetupStatusGesture(
   }
 }
 
+/** What ONE read-only workspace check established, bound to its own campaign. */
+export interface RedaxTeamAdminSetupWorkspaceReadOnlyOutcome {
+  readonly campaignId: string
+  readonly status: RedaxTeamAdminMutationStatusReadResult
+  readonly freshChainTruth: RedaxTeamAdminSetupFreshChainTruth
+}
+
+/**
+ * THE READ-ONLY HALF of the status gesture above, for the bounded workspace check (demo
+ * customer flow, 2026-10-22): re-read the slot, then read chain — the same order, and the
+ * same mapping. It NEVER reconciles. Resolving a saved attempt moves the durable record, and
+ * that stays the explicit "Check status" click; an event-triggered check only reads.
+ */
+export async function runRedaxTeamAdminSetupWorkspaceReadOnlyCheck(
+  ports: Omit<RedaxTeamAdminSetupStatusGesturePorts, 'reconcileMutation'>,
+  campaignId: string,
+): Promise<RedaxTeamAdminSetupWorkspaceReadOnlyOutcome> {
+  const status = await ports.readMutationStatus()
+  const fresh = await ports.readFreshCampaignSetupTruth(campaignId)
+  return {
+    campaignId,
+    status,
+    freshChainTruth: fresh.ok
+      ? { kind: 'OK', campaignId, campaign: fresh.campaign, tokenConfigs: fresh.tokenConfigs }
+      : { kind: 'REFUSED', campaignId, code: fresh.code },
+  }
+}
+
 /**
  * Why the explicitly selected campaign is, or is not, a mutation target.
  *
@@ -416,34 +480,6 @@ function shortenAddress(value: string): string {
   return value.length <= 9 ? value : `${value.slice(0, 4)}…${value.slice(-4)}`
 }
 
-/**
- * One editable field id to the exact draft patch it produces.
- *
- * Written out rather than computed from the id, so the mapping is TOTAL in source: the
- * `never` binding in the default arm means a sixth field id stops this file compiling
- * until somebody decides what it edits.
- */
-function redaxTeamAdminTokenConfigDraftPatch(
-  field: TeamAdminAddTokenConfigFieldId,
-  value: string,
-): Partial<Omit<RedaxTeamAdminTokenConfigDraftRow, 'rowId'>> {
-  switch (field) {
-    case 'legacyMint':
-      return { legacyMint: value }
-    case 'expectedLegacyDecimals':
-      return { expectedLegacyDecimals: value }
-    case 'rateNumerator':
-      return { rateNumerator: value }
-    case 'rateDenominator':
-      return { rateDenominator: value }
-    case 'maxOutputFromTokenConfig':
-      return { maxOutputFromTokenConfig: value }
-    default: {
-      const exhaustive: never = field
-      return exhaustive
-    }
-  }
-}
 
 /**
  * The sanitized status projection, folded into the pure module's structural input.
@@ -670,6 +706,26 @@ export function redaxTeamAdminSetupSolPreflightScope(
   return `${approvedTeamWallet ?? ''}|${connectedPublicKey ?? ''}|${selectedCampaignId}|${operation}`
 }
 
+/** One read-only mint read for one row, scoped to the exact mint it was taken for. */
+type SetupMintRead =
+  | { readonly mint: string; readonly status: 'reading' }
+  | { readonly mint: string; readonly status: 'done'; readonly result: RedaxTeamAdminClassicMintFactsResult }
+
+/** One campaign's unsent rows and everything typed, read or ticked for them. Memory only. */
+interface SetupDraftWorkspace {
+  readonly draftRows: readonly RedaxTeamAdminTokenConfigDraftRow[]
+  readonly humanDrafts: Readonly<Record<string, RedaxTeamAdminTokenConfigHumanDraft>>
+  readonly mintReads: Readonly<Record<string, SetupMintRead>>
+  readonly acknowledgedRowKeys: Readonly<Record<string, string>>
+}
+
+const EMPTY_SETUP_DRAFT_WORKSPACE: SetupDraftWorkspace = Object.freeze({
+  draftRows: Object.freeze([]) as readonly RedaxTeamAdminTokenConfigDraftRow[],
+  humanDrafts: Object.freeze({}),
+  mintReads: Object.freeze({}),
+  acknowledgedRowKeys: Object.freeze({}),
+})
+
 export function RedaxTeamAdminCampaignSetupPanel({
   approvedTeamWallet,
   campaignDataReady,
@@ -679,12 +735,93 @@ export function RedaxTeamAdminCampaignSetupPanel({
   selectedCampaign,
   selectedCampaignId,
   tokenConfigs,
+  workspaceCheck = null,
+  onVerifiedChainChange,
+  explorerCluster = null,
 }: RedaxTeamAdminCampaignSetupPanelProps) {
   const actions = useRedaxTeamAdminMutationActions()
   const wallet = useRedaxWallet()
 
   // MEMORY ONLY, and nowhere else. No storage port, no lock, no fourth owner.
-  const [draftRows, setDraftRows] = useState<readonly RedaxTeamAdminTokenConfigDraftRow[]>([])
+  //
+  // AND PER CAMPAIGN. This panel stays mounted while the selection moves between campaigns,
+  // so the unsent rows, what was typed for them, their mint reads and their review ticks are
+  // kept in one workspace PER explicitly selected campaign: campaign B starts from its own
+  // (empty) workspace, and going back to A finds A's unsent rows where they were. Nothing of
+  // A's can appear as B's — and no tick survives a change of campaign or wallet (see the
+  // review binding below), so a returning row is re-reviewed before it can be sent.
+  const [draftWorkspaces, setDraftWorkspaces] = useState<
+    Readonly<Record<string, SetupDraftWorkspace>>
+  >({})
+  const draftScope = selectedCampaignId
+  const draftWorkspace = draftWorkspaces[draftScope] ?? EMPTY_SETUP_DRAFT_WORKSPACE
+  // The raw rows: the ONE admission and submission authority.
+  const draftRows = draftWorkspace.draftRows
+  // THE HUMAN HALF OF EACH ROW, keyed by the row's local id beside the raw row it converts
+  // into. It only decides how a person types the row.
+  const humanDrafts = draftWorkspace.humanDrafts
+  // The last read-only mint read per row, scoped to the exact mint it was taken for.
+  const mintReads = draftWorkspace.mintReads
+  // Per-row acknowledgement, keyed to the EXACT raw terms AND the exact target reviewed.
+  const acknowledgedRowKeys = draftWorkspace.acknowledgedRowKeys
+  const updateDraftWorkspace = useCallback(
+    <K extends keyof SetupDraftWorkspace>(
+      scope: string,
+      key: K,
+      update: SetupDraftWorkspace[K] | ((current: SetupDraftWorkspace[K]) => SetupDraftWorkspace[K]),
+    ): void => {
+      setDraftWorkspaces((all) => {
+        const current = all[scope] ?? EMPTY_SETUP_DRAFT_WORKSPACE
+        const value =
+          typeof update === 'function'
+            ? (update as (current: SetupDraftWorkspace[K]) => SetupDraftWorkspace[K])(current[key])
+            : update
+        return { ...all, [scope]: { ...current, [key]: value } }
+      })
+    },
+    [],
+  )
+  const setDraftRows = useCallback(
+    (update: SetupDraftWorkspace['draftRows'] | ((current: SetupDraftWorkspace['draftRows']) => SetupDraftWorkspace['draftRows'])): void => {
+      updateDraftWorkspace(draftScope, 'draftRows', update)
+    },
+    [draftScope, updateDraftWorkspace],
+  )
+  const setHumanDrafts = useCallback(
+    (update: (current: SetupDraftWorkspace['humanDrafts']) => SetupDraftWorkspace['humanDrafts']): void => {
+      updateDraftWorkspace(draftScope, 'humanDrafts', update)
+    },
+    [draftScope, updateDraftWorkspace],
+  )
+  const setMintReads = useCallback(
+    (update: (current: SetupDraftWorkspace['mintReads']) => SetupDraftWorkspace['mintReads']): void => {
+      updateDraftWorkspace(draftScope, 'mintReads', update)
+    },
+    [draftScope, updateDraftWorkspace],
+  )
+  const setAcknowledgedRowKeys = useCallback(
+    (update: (current: SetupDraftWorkspace['acknowledgedRowKeys']) => SetupDraftWorkspace['acknowledgedRowKeys']): void => {
+      updateDraftWorkspace(draftScope, 'acknowledgedRowKeys', update)
+    },
+    [draftScope, updateDraftWorkspace],
+  )
+  const mintReadGenerationRef = useRef<Record<string, number>>({})
+  // THE REVIEW CONTEXT EPOCH. It advances whenever the explicitly selected campaign or the
+  // connected wallet changes — React's "information from the previous render" pattern, so no
+  // effect is involved — and it is part of every review key. A tick given before a campaign
+  // or wallet change can therefore never validate again, even if the old context returns.
+  const [reviewContext, setReviewContext] = useState<{
+    readonly campaign: string
+    readonly wallet: string | null
+    readonly epoch: number
+  }>({ campaign: selectedCampaignId, wallet: wallet.publicKeyBase58, epoch: 0 })
+  if (reviewContext.campaign !== selectedCampaignId || reviewContext.wallet !== wallet.publicKeyBase58) {
+    setReviewContext({
+      campaign: selectedCampaignId,
+      wallet: wallet.publicKeyBase58,
+      epoch: reviewContext.epoch + 1,
+    })
+  }
   // The reading the LAST explicit status gesture took, or `null` for "none current".
   //
   // It is cleared whenever a gesture STARTS and whenever a submission runs, so the window
@@ -741,6 +878,40 @@ export function RedaxTeamAdminCampaignSetupPanel({
   // The connected identity this panel's C1 reads about. It is the SAME public facade value
   // the wallet status above is derived from — never a second identity source.
   const connectedPublicKeyForSolPreflight = wallet.publicKeyBase58
+  // WHAT A ROW REVIEW IS ABOUT, beyond the row's own terms: this exact campaign and its output
+  // mint, this network and program, the approved Team and the wallet actually connected, in the
+  // current review epoch. `null` — and therefore no tick and no submit — until all are known and
+  // the connected wallet IS the approved Team.
+  const reviewBinding: RedaxTeamAdminTokenConfigReviewBinding | null =
+    authorityConfirmed &&
+    walletConnectedMatch &&
+    authoritativeCampaign !== null &&
+    approvedTeamWallet !== null &&
+    wallet.publicKeyBase58 !== null &&
+    programId !== null &&
+    reviewContext.campaign === selectedCampaignId &&
+    reviewContext.wallet === wallet.publicKeyBase58
+      ? {
+          campaign: selectedCampaignId,
+          outputMint: authoritativeCampaign.outputMint,
+          programId,
+          network: explorerCluster ?? '',
+          approvedTeamWallet,
+          connectedWallet: wallet.publicKeyBase58,
+          contextEpoch: reviewContext.epoch,
+        }
+      : null
+  // THE COMMITTED REVIEW STATE. Published after every commit so the submit handler judges a
+  // click against the binding, the ticks and the rows that are on screen NOW — never against
+  // the render that happened to draw the button it came from.
+  const committedReviewRef = useRef<{
+    readonly binding: RedaxTeamAdminTokenConfigReviewBinding | null
+    readonly acknowledgedRowKeys: Readonly<Record<string, string>>
+    readonly draftRows: readonly RedaxTeamAdminTokenConfigDraftRow[]
+  }>({ binding: null, acknowledgedRowKeys: {}, draftRows: [] })
+  useLayoutEffect(() => {
+    committedReviewRef.current = { binding: reviewBinding, acknowledgedRowKeys, draftRows }
+  })
 
   // --- C1 shared mounted / member refs ------------------------------------------
   //
@@ -1058,19 +1229,98 @@ export function RedaxTeamAdminCampaignSetupPanel({
     ],
   )
 
-  const updateDraft = useCallback(
-    (rowId: string, field: TeamAdminAddTokenConfigFieldId, value: string): void => {
+  /** Apply one human edit, and write the EXACT raw conversion into the raw row. */
+  const updateHumanDraft = useCallback(
+    (rowId: string, patch: Partial<RedaxTeamAdminTokenConfigHumanDraft>, outputDecimals: number): void => {
       setDraftError(null)
-      setDraftRows((current) => {
-        const next = reduceRedaxTeamAdminTokenConfigDraftRows(current, {
+      const next = { ...(humanDrafts[rowId] ?? EMPTY_REDAX_TEAM_ADMIN_TOKEN_CONFIG_HUMAN_DRAFT), ...patch }
+      const converted = convertRedaxTeamAdminTokenConfigHumanDraft(next, outputDecimals)
+      setHumanDrafts((current) => ({ ...current, [rowId]: next }))
+      setDraftRows((rows) => {
+        const edited = reduceRedaxTeamAdminTokenConfigDraftRows(rows, {
           kind: 'edit',
           rowId,
-          patch: redaxTeamAdminTokenConfigDraftPatch(field, value),
+          patch: {
+            rateNumerator: converted.rateNumerator,
+            rateDenominator: converted.rateDenominator,
+            maxOutputFromTokenConfig: converted.maxOutputFromTokenConfig,
+          },
         })
-        return next.ok ? next.rows : current
+        return edited.ok ? edited.rows : rows
       })
     },
-    [],
+    [humanDrafts, setDraftRows, setHumanDrafts],
+  )
+
+  /**
+   * THE READ-ONLY MINT READ that fills a row's decimals. Started by a canonical address
+   * being entered or by the explicit re-read; a result is applied ONLY if the row still
+   * names the same mint and no newer read for the row has started.
+   */
+  const readRowMint = useCallback(
+    async (rowId: string, mint: string): Promise<void> => {
+      // The campaign this read belongs to, fixed before the first await: a late answer is
+      // written into THAT campaign's workspace, and only if the row there still names the
+      // same mint and no newer read for the row started — never into whatever is selected now.
+      const scope = draftScope
+      const generation = (mintReadGenerationRef.current[rowId] ?? 0) + 1
+      mintReadGenerationRef.current[rowId] = generation
+      updateDraftWorkspace(scope, 'mintReads', (current) => ({ ...current, [rowId]: { mint, status: 'reading' } }))
+      let result: RedaxTeamAdminClassicMintFactsResult
+      try {
+        result = await actions.readClassicMintFacts(mint)
+      } catch {
+        result = { ok: false, code: 'READ_UNAVAILABLE' }
+      }
+      setDraftWorkspaces((all) => {
+        const workspace = all[scope] ?? EMPTY_SETUP_DRAFT_WORKSPACE
+        const row = workspace.draftRows.find((candidate) => candidate.rowId === rowId)
+        if (mintReadGenerationRef.current[rowId] !== generation || row === undefined || row.legacyMint !== mint) {
+          return all
+        }
+        const edited = reduceRedaxTeamAdminTokenConfigDraftRows(workspace.draftRows, {
+          kind: 'edit',
+          rowId,
+          patch: { expectedLegacyDecimals: result.ok ? String(result.decimals) : '' },
+        })
+        return {
+          ...all,
+          [scope]: {
+            ...workspace,
+            mintReads: { ...workspace.mintReads, [rowId]: { mint, status: 'done', result } },
+            draftRows: edited.ok ? edited.rows : workspace.draftRows,
+          },
+        }
+      })
+    },
+    [actions, draftScope, updateDraftWorkspace],
+  )
+
+  /** A new mint invalidates the old decimals at once, and reads the new one if canonical. */
+  const updateRowMint = useCallback(
+    (rowId: string, value: string): void => {
+      setDraftError(null)
+      mintReadGenerationRef.current[rowId] = (mintReadGenerationRef.current[rowId] ?? 0) + 1
+      setMintReads((current) => {
+        const next = { ...current }
+        delete next[rowId]
+        return next
+      })
+      setDraftRows((rows) => {
+        const edited = reduceRedaxTeamAdminTokenConfigDraftRows(rows, {
+          kind: 'edit',
+          rowId,
+          patch: { legacyMint: value, expectedLegacyDecimals: '' },
+        })
+        return edited.ok ? edited.rows : rows
+      })
+      if (isCanonicalRedaxPublicKey(value)) {
+        // The completion check compares against the committed row, which by then names
+        // this mint; a later edit to the row discards this read's answer.
+        void readRowMint(rowId, value)
+      }
+    },
+    [readRowMint, setDraftRows, setMintReads],
   )
 
   const addDraftRow = useCallback((): void => {
@@ -1091,7 +1341,7 @@ export function RedaxTeamAdminCampaignSetupPanel({
       })
       return next.ok ? next.rows : current
     })
-  }, [draftRows.length])
+  }, [draftRows.length, setDraftRows])
 
   const removeDraftRow = useCallback((rowId: string): void => {
     setDraftError(null)
@@ -1099,7 +1349,7 @@ export function RedaxTeamAdminCampaignSetupPanel({
       const next = reduceRedaxTeamAdminTokenConfigDraftRows(current, { kind: 'remove', rowId })
       return next.ok ? next.rows : current
     })
-  }, [])
+  }, [setDraftRows])
 
   const moveDraftRow = useCallback((rowId: string, toIndex: number): void => {
     setDraftError(null)
@@ -1111,7 +1361,7 @@ export function RedaxTeamAdminCampaignSetupPanel({
       })
       return next.ok ? next.rows : current
     })
-  }, [])
+  }, [setDraftRows])
 
   /**
    * THE ONE SUBMIT PATH, per row, from an explicit click and nowhere else.
@@ -1129,6 +1379,30 @@ export function RedaxTeamAdminCampaignSetupPanel({
       // The rendered control is already disabled without these; the handler asserts them
       // again because a disabled attribute is a rendering, not a gate.
       if (!authorityConfirmed || !walletConnectedMatch) {
+        return
+      }
+      // THE ROW'S OWN REVIEW, RE-ASSERTED SYNCHRONOUSLY AGAINST THE EXACT TARGET. The row must
+      // be this campaign's, carry this campaign's output mint, still be the draft row of the
+      // CURRENT campaign workspace with identical raw terms, and its tick must be the key of
+      // those terms in the CURRENT review binding. A tick from another campaign, another
+      // wallet or an earlier epoch never matches — whatever the button happened to render.
+      const committed = committedReviewRef.current
+      const draft = committed.draftRows.find((candidate) => candidate.rowId === row.rowId)
+      const reviewKey =
+        draft === undefined ? null : redaxTeamAdminTokenConfigReviewKey(draft, committed.binding)
+      if (
+        committed.binding === null ||
+        draft === undefined ||
+        reviewKey === null ||
+        committed.acknowledgedRowKeys[row.rowId] !== reviewKey ||
+        row.campaign !== committed.binding.campaign ||
+        row.outputMint !== committed.binding.outputMint ||
+        row.legacyMint !== draft.legacyMint ||
+        row.rateNumerator !== draft.rateNumerator ||
+        row.rateDenominator !== draft.rateDenominator ||
+        row.maxOutputFromTokenConfig !== draft.maxOutputFromTokenConfig ||
+        String(row.expectedLegacyDecimals) !== draft.expectedLegacyDecimals
+      ) {
         return
       }
       // THE COMMITTED C1 PROJECTION, RE-ASSERTED SYNCHRONOUSLY. The rendered gate can be one
@@ -1165,6 +1439,9 @@ export function RedaxTeamAdminCampaignSetupPanel({
           expectedOutputDecimals: row.expectedOutputDecimals,
         })
         setSubmitResult(result)
+        if (isRedaxTeamAdminVerifiedResolutionCode(result.code)) {
+          onVerifiedChainChange?.(selectedCampaignId)
+        }
         // A READ, never a reconcile. The row's next state has to come from the durable
         // record rather than from what this handler happens to remember.
         setStatusResult(await actions.readMutationStatus())
@@ -1178,6 +1455,8 @@ export function RedaxTeamAdminCampaignSetupPanel({
       addTokenConfigSolPreflightScope,
       addTokenConfigSolPreflightSufficient,
       authorityConfirmed,
+      onVerifiedChainChange,
+      selectedCampaignId,
       walletConnectedMatch,
     ],
   )
@@ -1202,15 +1481,20 @@ export function RedaxTeamAdminCampaignSetupPanel({
     // The previous reading stops being current the moment a new gesture begins.
     setFreshChainTruth(null)
     try {
-      const outcome = await runRedaxTeamAdminSetupStatusGesture(
-        {
-          reconcileMutation: () => actions.reconcileMutation(),
-          readMutationStatus: () => actions.readMutationStatus(),
-          readFreshCampaignSetupTruth,
-        },
-        gestureCampaignId,
+      const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+        runRedaxTeamAdminSetupStatusGesture(
+          {
+            reconcileMutation: () => actions.reconcileMutation(),
+            readMutationStatus: () => actions.readMutationStatus(),
+            readFreshCampaignSetupTruth,
+          },
+          gestureCampaignId,
+        ),
       )
       setReconcileCode(outcome.reconcileCode)
+      if (isRedaxTeamAdminVerifiedResolutionCode(outcome.reconcileCode)) {
+        onVerifiedChainChange?.(gestureCampaignId)
+      }
       setStatusResult(outcome.status)
       // Written WITH its campaign. A late arrival for a superseded selection is discarded
       // by `selectRedaxTeamAdminSetupChainTruth`, which compares the two on every render —
@@ -1222,6 +1506,43 @@ export function RedaxTeamAdminCampaignSetupPanel({
     }
   }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
 
+  // THE ONE BOUNDED WORKSPACE TRIGGER — READ-ONLY. It runs for the newest workspace check of
+  // this campaign once the panel is free; never on a timer, never on mount, never for another
+  // campaign, and it never reconciles — that stays the click above. It claims the panel's latch
+  // synchronously and answers whether a read actually STARTED, so a request that met a busy
+  // panel stays pending in the hook instead of being lost.
+  const handleWorkspaceReadOnlyCheck = useCallback((): boolean => {
+    if (inFlightRef.current !== null) {
+      return false
+    }
+    const gestureCampaignId = selectedCampaignId
+    inFlightRef.current = 'status'
+    setOperation('status')
+    setFreshChainTruth(null)
+    void (async (): Promise<void> => {
+      try {
+        const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+          runRedaxTeamAdminSetupWorkspaceReadOnlyCheck(
+            {
+              readMutationStatus: () => actions.readMutationStatus(),
+              readFreshCampaignSetupTruth,
+            },
+            gestureCampaignId,
+          ),
+        )
+        setStatusResult(outcome.status)
+        setFreshChainTruth(outcome.freshChainTruth)
+      } catch {
+        // A read that throws leaves the cleared display; the explicit status check remains.
+      } finally {
+        inFlightRef.current = null
+        setOperation(null)
+      }
+    })()
+    return true
+  }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
+  useRedaxTeamAdminWorkspaceCheck(workspaceCheck, selectedCampaignId, busy, handleWorkspaceReadOnlyCheck)
+
   const identityNote =
     walletStatus === 'CARRIER_UNAVAILABLE'
       ? TEAM_ADMIN_ADD_TOKEN_CONFIG.carrierUnavailable
@@ -1230,6 +1551,41 @@ export function RedaxTeamAdminCampaignSetupPanel({
         : walletStatus === 'CONNECTED_MATCH'
           ? TEAM_ADMIN_ADD_TOKEN_CONFIG.connectedMatch
           : TEAM_ADMIN_ADD_TOKEN_CONFIG.connectedMismatch
+
+  // INFORMATION ONLY: do the per-input limits (saved on chain plus unsent drafts) add up to
+  // more than the campaign limit? That is a valid setup and is never refused here.
+  const inputCapsExceedCampaignCap = ((): boolean => {
+    const campaign = chainTruth.campaign
+    if (campaign === null) {
+      return false
+    }
+    let campaignCap: bigint
+    try {
+      campaignCap = BigInt(campaign.maxOutputSupplyRaw)
+    } catch {
+      return false
+    }
+    if (campaignCap === 0n) {
+      return false
+    }
+    let sum = 0n
+    const caps = [
+      ...chainTokenConfigs.map((facts) => facts.maxOutputFromTokenConfig),
+      ...draftRows.map((row) => row.maxOutputFromTokenConfig),
+    ]
+    for (const cap of caps) {
+      if (!/^(?:0|[1-9][0-9]*)$/.test(cap)) {
+        continue
+      }
+      const value = BigInt(cap)
+      if (value === 0n) {
+        // An unlimited input can always reach the campaign limit by itself.
+        return true
+      }
+      sum += value
+    }
+    return sum > campaignCap
+  })()
 
   const statusSummary =
     statusResult === null
@@ -1259,7 +1615,7 @@ export function RedaxTeamAdminCampaignSetupPanel({
           <p className="wizard-preview__header">{TEAM_ADMIN_ADD_TOKEN_CONFIG.authorityTitle}</p>
           <div className="wizard-preview__stephead">
             <StatusPill
-              label={campaignAuthority}
+              label={TEAM_ADMIN_AUTHORITY_LABELS[campaignAuthority] ?? campaignAuthority}
               tone={authorityConfirmed ? 'positive' : 'neutral'}
             />
           </div>
@@ -1267,10 +1623,12 @@ export function RedaxTeamAdminCampaignSetupPanel({
             {TEAM_ADMIN_ADD_TOKEN_CONFIG.authority[campaignAuthority]}
           </p>
           {authoritativeCampaign?.campaignAddress ? (
-            <MetricRow
-              label="Campaign address (shortened)"
-              value={shortenAddress(authoritativeCampaign.campaignAddress)}
-              hint="the campaign this row would be added to"
+            <RedaxPublicAddress
+              explorerCluster={explorerCluster}
+              hint="the campaign these inputs are added to"
+              kind="address"
+              label="Campaign address"
+              value={authoritativeCampaign.campaignAddress}
             />
           ) : null}
           <MetricRow
@@ -1374,6 +1732,9 @@ export function RedaxTeamAdminCampaignSetupPanel({
             value={capacity.mutationSlotOccupied ? 'occupied or unread' : 'free'}
           />
           <p className="wizard-preview__fieldnote">{TEAM_ADMIN_ADD_TOKEN_CONFIG.capacityNote}</p>
+          {inputCapsExceedCampaignCap ? (
+            <p className="wizard-preview__fieldhint">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.capSumNote}</p>
+          ) : null}
         </div>
 
         {/*
@@ -1465,6 +1826,10 @@ export function RedaxTeamAdminCampaignSetupPanel({
               // its mind about what a refusal implies.
               !chainTruth.freshReadRefused &&
               !busy &&
+              // THE ROW'S OWN REVIEW: the exact raw terms shown below were acknowledged, and
+              // nothing has changed since (any edit changes the key and voids it).
+              redaxTeamAdminTokenConfigReviewKey(judged.draft, reviewBinding) !== null &&
+              acknowledgedRowKeys[rowId] === redaxTeamAdminTokenConfigReviewKey(judged.draft, reviewBinding) &&
               addTokenConfigSolPreflightSufficient
             return (
               <div className="wizard-preview__field" key={rowId}>
@@ -1492,30 +1857,214 @@ export function RedaxTeamAdminCampaignSetupPanel({
                     : TEAM_ADMIN_ADD_TOKEN_CONFIG.rowStateNote[disposition.state]}
                 </p>
 
-                <div className="wizard-preview__fieldbody">
-                  {TEAM_ADMIN_ADD_TOKEN_CONFIG.fields.map((field) => {
-                    const inputId = `redax-team-add-token-config-${rowId}-${field.id}`
-                    return (
-                      <div className="wizard-preview__field" key={field.id}>
-                        <label className="wizard-preview__fieldname" htmlFor={inputId}>
-                          {field.label}
-                        </label>
-                        <input
-                          className="wizard-preview__input"
-                          disabled={busy || disposition.state === 'CONFIRMED'}
-                          id={inputId}
-                          inputMode="text"
-                          onChange={(event) => {
-                            updateDraft(rowId, field.id, event.target.value)
+                {(() => {
+                  const human = humanDrafts[rowId] ?? EMPTY_REDAX_TEAM_ADMIN_TOKEN_CONFIG_HUMAN_DRAFT
+                  const converted = convertRedaxTeamAdminTokenConfigHumanDraft(human, expectedOutputDecimals)
+                  const mintRead = mintReads[rowId]
+                  const mintReadForThisMint =
+                    mintRead !== undefined && mintRead.mint === judged.draft.legacyMint ? mintRead : null
+                  const legacyDecimals =
+                    mintReadForThisMint !== null &&
+                    mintReadForThisMint.status === 'done' &&
+                    mintReadForThisMint.result.ok
+                      ? mintReadForThisMint.result.decimals
+                      : null
+                  const example = exampleRedaxTeamAdminTokenConfigQuote(
+                    judged.draft.rateNumerator,
+                    judged.draft.rateDenominator,
+                    legacyDecimals,
+                    expectedOutputDecimals,
+                  )
+                  const rowLocked = busy || disposition.state === 'CONFIRMED'
+                  const reviewKey = redaxTeamAdminTokenConfigReviewKey(judged.draft, reviewBinding)
+                  const reviewable =
+                    legacyDecimals !== null &&
+                    converted.rateIssue === null &&
+                    converted.capIssue === null &&
+                    judged.validRow !== null
+                  return (
+                    <div className="wizard-preview__fieldbody human-terms">
+                      <label className="wizard-preview__fieldname" htmlFor={`redax-team-tc-${rowId}-mint`}>
+                        {TEAM_ADMIN_TOKEN_CONFIG_TERMS.mintLabel}
+                      </label>
+                      <input
+                        className="wizard-preview__input"
+                        disabled={rowLocked}
+                        id={`redax-team-tc-${rowId}-mint`}
+                        onChange={(event) => {
+                          updateRowMint(rowId, (event.target as unknown as { readonly value: string }).value)
+                        }}
+                        spellCheck={false}
+                        type="text"
+                        value={judged.draft.legacyMint}
+                      />
+                      {mintReadForThisMint === null ? (
+                        <p className="wizard-preview__fieldnote">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.mintPending}</p>
+                      ) : mintReadForThisMint.status === 'reading' ? (
+                        <p className="wizard-preview__fieldnote">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.mintReading}</p>
+                      ) : mintReadForThisMint.result.ok ? (
+                        <p className="wizard-preview__fieldhint">
+                          {`Classic SPL token · ${mintReadForThisMint.result.decimals} decimals (read from devnet). The name is not shown — check the full address.`}
+                        </p>
+                      ) : (
+                        <p className="wizard-preview__fieldwarning">
+                          {TEAM_ADMIN_TOKEN_CONFIG_TERMS.mintRefused[mintReadForThisMint.result.code]}
+                        </p>
+                      )}
+                      {isCanonicalRedaxPublicKey(judged.draft.legacyMint) ? (
+                        <button
+                          className="wallet-badge__btn"
+                          disabled={rowLocked}
+                          onClick={() => {
+                            void readRowMint(rowId, judged.draft.legacyMint)
                           }}
-                          type="text"
-                          value={judged.draft[field.id]}
-                        />
-                        <p className="wizard-preview__fieldnote">{field.note}</p>
-                      </div>
-                    )
-                  })}
-                </div>
+                          type="button"
+                        >
+                          {TEAM_ADMIN_TOKEN_CONFIG_TERMS.mintReadAgain}
+                        </button>
+                      ) : null}
+
+                      <fieldset className="human-terms__group" disabled={rowLocked}>
+                        <legend className="wizard-preview__fieldname">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateLegend}</legend>
+                        <div className="human-terms__rate">
+                          <input
+                            aria-label={TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateOldLabel}
+                            className="wizard-preview__input human-terms__small"
+                            inputMode="decimal"
+                            onChange={(event) => {
+                              updateHumanDraft(
+                                rowId,
+                                { oldAmount: (event.target as unknown as { readonly value: string }).value },
+                                expectedOutputDecimals,
+                              )
+                            }}
+                            placeholder="1"
+                            type="text"
+                            value={human.oldAmount}
+                          />
+                          <span>{TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateOldLabel} →</span>
+                          <input
+                            aria-label={TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateNewLabel}
+                            className="wizard-preview__input human-terms__small"
+                            inputMode="decimal"
+                            onChange={(event) => {
+                              updateHumanDraft(
+                                rowId,
+                                { newAmount: (event.target as unknown as { readonly value: string }).value },
+                                expectedOutputDecimals,
+                              )
+                            }}
+                            placeholder="1"
+                            type="text"
+                            value={human.newAmount}
+                          />
+                          <span>{TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateNewLabel}</span>
+                        </div>
+                        <p className="wizard-preview__fieldnote">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.rateNote}</p>
+                        {converted.rateIssue !== null ? (
+                          <p className="wizard-preview__fieldwarning">{converted.rateIssue}</p>
+                        ) : null}
+                      </fieldset>
+
+                      <fieldset className="human-terms__group" disabled={rowLocked}>
+                        <legend className="wizard-preview__fieldname">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.capLegend}</legend>
+                        <label className="human-terms__choice">
+                          <input
+                            checked={human.capMode === 'LIMIT'}
+                            name={`redax-team-tc-${rowId}-cap-mode`}
+                            onChange={() => updateHumanDraft(rowId, { capMode: 'LIMIT' }, expectedOutputDecimals)}
+                            type="radio"
+                          />
+                          {TEAM_ADMIN_TOKEN_CONFIG_TERMS.capLimitChoice}
+                        </label>
+                        <label className="human-terms__choice">
+                          <input
+                            checked={human.capMode === 'NONE'}
+                            name={`redax-team-tc-${rowId}-cap-mode`}
+                            onChange={() => updateHumanDraft(rowId, { capMode: 'NONE' }, expectedOutputDecimals)}
+                            type="radio"
+                          />
+                          {TEAM_ADMIN_TOKEN_CONFIG_TERMS.capNoneChoice}
+                        </label>
+                        {human.capMode === 'LIMIT' ? (
+                          <input
+                            aria-label={TEAM_ADMIN_TOKEN_CONFIG_TERMS.capAmountLabel}
+                            className="wizard-preview__input"
+                            inputMode="decimal"
+                            onChange={(event) => {
+                              updateHumanDraft(
+                                rowId,
+                                { capAmount: (event.target as unknown as { readonly value: string }).value },
+                                expectedOutputDecimals,
+                              )
+                            }}
+                            placeholder="10"
+                            type="text"
+                            value={human.capAmount}
+                          />
+                        ) : null}
+                        <p className="wizard-preview__fieldnote">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.capNote}</p>
+                        {converted.capIssue !== null ? (
+                          <p className="wizard-preview__fieldwarning">{converted.capIssue}</p>
+                        ) : null}
+                      </fieldset>
+
+                      {reviewable ? (
+                        <div className="human-terms__review">
+                          <p className="wizard-preview__header">{TEAM_ADMIN_TOKEN_CONFIG_TERMS.reviewTitle}</p>
+                          <RedaxPublicAddress
+                            explorerCluster={explorerCluster}
+                            hint={`${legacyDecimals} decimals, read from devnet`}
+                            kind="address"
+                            label="Old token mint"
+                            value={judged.draft.legacyMint}
+                          />
+                          <MetricRow
+                            label="Rate"
+                            value={`${judged.draft.rateDenominator} old → ${judged.draft.rateNumerator} new (gross)`}
+                            hint={`exact ratio stored as ${judged.draft.rateNumerator}/${judged.draft.rateDenominator}`}
+                          />
+                          {example !== null ? (
+                            <MetricRow
+                              label="Example: 1 old token"
+                              value={`gross ${example.grossOut} · fee ${example.feeOut} · holder receives ${example.netOut} new`}
+                              hint="the program’s own order: adjust decimals, apply the rate (floor), then the 1% fee (floor)"
+                            />
+                          ) : null}
+                          <MetricRow
+                            label="Input limit (gross)"
+                            value={
+                              judged.draft.maxOutputFromTokenConfig === '0'
+                                ? 'No limit'
+                                : `${formatRedaxRawAmount(BigInt(judged.draft.maxOutputFromTokenConfig), expectedOutputDecimals)} new tokens`
+                            }
+                            hint={`stored as max_output_from_tc = ${judged.draft.maxOutputFromTokenConfig}`}
+                          />
+                          <label className="human-terms__ack">
+                            <input
+                              checked={reviewKey !== null && acknowledgedRowKeys[rowId] === reviewKey}
+                              disabled={rowLocked || reviewKey === null}
+                              onChange={(event) => {
+                                const checked = (event.target as unknown as { readonly checked: boolean }).checked
+                                setAcknowledgedRowKeys((current) => {
+                                  const next = { ...current }
+                                  if (checked && reviewKey !== null) {
+                                    next[rowId] = reviewKey
+                                  } else {
+                                    delete next[rowId]
+                                  }
+                                  return next
+                                })
+                              }}
+                              type="checkbox"
+                            />
+                            {TEAM_ADMIN_TOKEN_CONFIG_TERMS.acknowledgeLabel}
+                          </label>
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })()}
 
                 {judged.validRow !== null ? (
                   <MetricRow
@@ -1529,7 +2078,7 @@ export function RedaxTeamAdminCampaignSetupPanel({
                   <ul className="wizard-preview__policylist">
                     {judged.issues.map((rowIssue) => (
                       <li key={`${rowIssue.field}-${rowIssue.code}`}>
-                        {`${rowIssue.field}: ${TEAM_ADMIN_ADD_TOKEN_CONFIG.issueNote[rowIssue.code]}`}
+                        {`${TEAM_ADMIN_TOKEN_CONFIG_FIELD_NAMES[rowIssue.field] ?? rowIssue.field}: ${TEAM_ADMIN_ADD_TOKEN_CONFIG.issueNote[rowIssue.code]}`}
                       </li>
                     ))}
                   </ul>
@@ -1652,12 +2201,18 @@ export function RedaxTeamAdminCampaignSetupPanel({
             <p className="wizard-preview__header">{TEAM_ADMIN_ADD_TOKEN_CONFIG.resultTitle}</p>
             <div className="wizard-preview__stephead">
               <StatusPill
-                label={
-                  submitResult.busy
-                    ? 'ANOTHER_TEAM_ADMIN_MUTATION_IS_RUNNING'
-                    : submitResult.code
+                label={teamAdminMutationResultLabel(
+                  submitResult.code,
+                  submitResult.busy,
+                  submitResult.rawBroadcastCount,
+                )}
+                tone={
+                  isRedaxTeamAdminVerifiedResolutionCode(submitResult.code)
+                    ? 'positive'
+                    : submitResult.rawBroadcastCount === 1
+                      ? 'caution'
+                      : 'neutral'
                 }
-                tone={submitResult.rawBroadcastCount === 1 ? 'caution' : 'neutral'}
               />
             </div>
             <p className="wizard-preview__purpose">

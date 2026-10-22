@@ -51,7 +51,21 @@ import { RedaxWalletActionsProvider } from './wallet/RedaxWalletActions'
 import { RedaxHolderPrepareControls } from './wallet/RedaxHolderPrepareControls'
 import { RedaxHolderConvertControls } from './wallet/RedaxHolderConvertControls'
 import { RedaxTeamAdminActionsProvider } from './teamAdmin/RedaxTeamAdminActions'
-import { RedaxTeamAdminCampaignCreatePanel } from './teamAdmin/RedaxTeamAdminCampaignCreatePanel'
+import {
+  RedaxTeamAdminCampaignCreatePanel,
+  type RedaxTeamAdminSubmittedCreatePlan,
+} from './teamAdmin/RedaxTeamAdminCampaignCreatePanel'
+import {
+  RedaxTeamAdminWorkspaceSummary,
+  type RedaxTeamAdminWorkspaceCheckRequest,
+  type RedaxTeamAdminWorkspaceCheckState,
+} from './teamAdmin/RedaxTeamAdminWorkspaceSummary'
+import {
+  parseRedaxCampaignLinkQuery,
+  readRedaxAppBaseUrl,
+  readRedaxLocationSearch,
+  replaceRedaxCampaignLinkInLocation,
+} from './lib/redaxPublicLinks'
 import { RedaxTeamAdminMutationActionsProvider } from './teamAdmin/RedaxTeamAdminMutationActions'
 import { RedaxTeamAdminCampaignSetupPanel } from './teamAdmin/RedaxTeamAdminCampaignSetupPanel'
 import { RedaxTeamAdminCampaignMetadataPanel } from './teamAdmin/RedaxTeamAdminCampaignMetadataPanel'
@@ -1075,6 +1089,31 @@ export function App() {
   const [explicitTokenConfigSelection, setExplicitTokenConfigSelection] =
     useState<RedaxHolderExplicitTokenConfigSelectionV1 | null>(null)
 
+  // --- Demo customer flow (2026-10-22): share link, bounded refresh, planned prefill -------
+  //
+  // THE SHARE LINK IS A PREFILL, READ ONCE. `?campaign=<address>` is parsed from the page
+  // address at mount and handed to the by-address control as a pre-filled value. It selects
+  // nothing, reads nothing and connects nothing by itself: a person still presses Open, and
+  // the same strict by-address chain read decides what is there. This SUPERSEDES the earlier
+  // "no URL, no router" reading on exactly that point — the selection itself stays memory
+  // only, and the address bar is only updated AFTER an explicit selection.
+  const campaignLinkQuery = useMemo(() => parseRedaxCampaignLinkQuery(readRedaxLocationSearch()), [])
+  // The latest selection, for async completions that must not act on a superseded one.
+  const campaignSelectionRef = useRef<RedaxCampaignSelectionV1>(campaignSelection)
+  campaignSelectionRef.current = campaignSelection
+  // ONE workspace-wide check request: a counter and a campaign id. Panels run their own
+  // status check once per new request for their campaign — never on a timer.
+  const [workspaceCheck, setWorkspaceCheck] = useState<RedaxTeamAdminWorkspaceCheckRequest | null>(null)
+  const [selectionCheck, setSelectionCheck] = useState<RedaxTeamAdminWorkspaceCheckState>({
+    checkedAtMs: null,
+    refreshing: false,
+    failed: false,
+  })
+  // Planned metadata a Create submission sent, per campaign, in memory only — a prefill.
+  const [plannedMetadataByCampaign, setPlannedMetadataByCampaign] = useState<
+    Readonly<Record<string, RedaxTeamAdminSubmittedCreatePlan['metadata']>>
+  >({})
+
   // One App-facing RedaxDataSource for the component lifecycle, resolved once from
   // env: MOCK_LOCAL, any of the three devnet program-data modes (DEVNET_READONLY /
   // DEVNET_WALLET_READONLY / DEVNET_TX_ENABLED, which share one read-only adapter),
@@ -1147,6 +1186,12 @@ export function App() {
   const [selectionData, setSelectionData] = useState<RedaxSelectionData>({ status: 'loading' })
   // Monotonic selection counter. Only the newest selection may publish its answer.
   const selectionGenerationRef = useRef(0)
+  // Monotonic id of the newest selection READ — the selection load and every bounded refresh
+  // share it. Within ONE selection two reads can overlap (an automatic refresh after a verified
+  // mutation and a person's "Check and refresh", or two mutations' refreshes), so the generation
+  // alone cannot order them: only the newest read may publish data, loading/error or "Last
+  // checked", and an older answer — success or failure — is dropped when it arrives late.
+  const selectionReadRef = useRef(0)
   // DEVNET_WALLET_READONLY connected-wallet role context, resolved by the
   // provider-subtree bridge below (null outside that mode or before resolution).
   const [walletRoleContext, setWalletRoleContext] = useState<RedaxWalletRoleContextView | null>(null)
@@ -1195,6 +1240,8 @@ export function App() {
     let cancelled = false
     const generation = selectionGenerationRef.current + 1
     selectionGenerationRef.current = generation
+    const read = selectionReadRef.current + 1
+    selectionReadRef.current = read
     setSelectionData({ status: 'loading' })
     async function loadSelection(readyGlobal: Extract<RedaxGlobalData, { status: 'ready' }>) {
       const result = await loadRedaxSelectionData(
@@ -1206,11 +1253,20 @@ export function App() {
       if (cancelled) {
         return
       }
-      // A slower earlier selection must never overwrite a newer one.
-      if (!isCurrentSelectionGeneration(generation, selectionGenerationRef.current)) {
+      // A slower earlier selection — or a read a later refresh superseded — must never
+      // overwrite a newer one.
+      if (
+        !isCurrentSelectionGeneration(generation, selectionGenerationRef.current) ||
+        read !== selectionReadRef.current
+      ) {
         return
       }
       setSelectionData(result)
+      setSelectionCheck({
+        checkedAtMs: result.status === 'ready' ? Date.now() : null,
+        refreshing: false,
+        failed: result.status !== 'ready',
+      })
     }
     void loadSelection(globalData)
     return () => {
@@ -1303,6 +1359,8 @@ export function App() {
   // leave the previous UNLISTED kind attached to a listed campaign.
   function handleSelectListedCampaign(campaignId: string): void {
     setCampaignSelection({ kind: 'LISTED', campaignId })
+    // An explicit choice may be reflected in the address bar (same path, no reload).
+    replaceRedaxCampaignLinkInLocation(campaignId)
   }
 
   // An EXACTLY NAMED address entering the selection. The adoption control has already
@@ -1314,6 +1372,7 @@ export function App() {
   // until a by-address read establishes what is actually there.
   function handleAdoptCampaignAddress(campaignId: string): void {
     setCampaignSelection(deriveRedaxCampaignSelectionForAdoptedAddress(campaigns, campaignId))
+    replaceRedaxCampaignLinkInLocation(campaignId)
   }
 
   // LOCAL NAVIGATION, and nothing else. The Campaign Create panel offers this only after
@@ -1321,9 +1380,79 @@ export function App() {
   // moves the workspace to the campaign that was created, which is by definition not in
   // the curated directory. Creating a campaign therefore never lists one — no allowlist,
   // directory or featured membership is touched here or anywhere else in this module.
-  function handleOpenUnlistedCampaignWorkspace(campaignId: string): void {
+  function handleOpenUnlistedCampaignWorkspace(
+    campaignId: string,
+    submittedPlan: RedaxTeamAdminSubmittedCreatePlan | null = null,
+  ): void {
     setCampaignSelection({ kind: 'UNLISTED', campaignId })
+    replaceRedaxCampaignLinkInLocation(campaignId)
+    // A plan is kept ONLY under the campaign its own submission returned. A plan bound to any
+    // other campaign is dropped, and a missing plan never erases one already kept.
+    if (submittedPlan !== null && submittedPlan.campaign === campaignId) {
+      const plannedMetadata = submittedPlan.metadata
+      setPlannedMetadataByCampaign((current) => ({ ...current, [campaignId]: plannedMetadata }))
+    }
+    // THE OPEN FOLLOWS A VERIFIED CREATE, so each panel checks its saved state once.
+    setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
   }
+
+  /**
+   * ONE BOUNDED, BACKGROUND RE-READ of the selected campaign, its inputs and its summary —
+   * keeping the current view on screen until the new reading arrives, and never applying a
+   * reading to a selection that has since changed. A failed read keeps the old figures and
+   * says so; it is never presented as fresh.
+   *
+   * ONLY THE NEWEST READ PUBLISHES. Every call takes the next `selectionReadRef` id; an answer
+   * that arrives after a newer read started — success or failure — changes nothing: not the
+   * data, not `refreshing`, not `failed` and not "Last checked". The manual "Check and refresh"
+   * and the automatic refresh after a verified mutation go through this one rule.
+   */
+  const refreshSelectedCampaign = useCallback(async (): Promise<void> => {
+    if (globalData.status !== 'ready') {
+      return
+    }
+    const generation = selectionGenerationRef.current
+    const selectionAtStart = campaignSelectionRef.current
+    const read = selectionReadRef.current + 1
+    selectionReadRef.current = read
+    setSelectionCheck((current) => ({ ...current, refreshing: true }))
+    const result = await loadRedaxSelectionData(redaxDataSource, globalData, selectionAtStart, selectedHolderId)
+    if (
+      !isCurrentSelectionGeneration(generation, selectionGenerationRef.current) ||
+      campaignSelectionRef.current !== selectionAtStart ||
+      read !== selectionReadRef.current
+    ) {
+      return
+    }
+    if (result.status === 'ready') {
+      setSelectionData(result)
+      setSelectionCheck({ checkedAtMs: Date.now(), refreshing: false, failed: false })
+    } else {
+      // Keep the figures on screen when there are any; otherwise the newest answer IS the
+      // failure (a superseded load can no longer fill the view).
+      setSelectionData((current) => (current.status === 'ready' ? current : result))
+      setSelectionCheck((current) => ({ ...current, refreshing: false, failed: true }))
+    }
+  }, [globalData, redaxDataSource, selectedHolderId])
+
+  /** The person's one "Check and refresh": re-read, then let each panel check once. */
+  const handleWorkspaceCheck = useCallback((): void => {
+    const campaignId = campaignSelectionRef.current.campaignId
+    void refreshSelectedCampaign()
+    setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
+  }, [refreshSelectedCampaign])
+
+  /** A panel saw a mutation VERIFIED and RESOLVED just now: refresh the dependent views once. */
+  const handleVerifiedChainChange = useCallback(
+    (campaignId: string): void => {
+      if (campaignId !== campaignSelectionRef.current.campaignId) {
+        return
+      }
+      void refreshSelectedCampaign()
+      setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
+    },
+    [refreshSelectedCampaign],
+  )
 
   // Which of the two honest unlisted statements, if either, this render may make. Pure,
   // derived from the current load, and remembered nowhere.
@@ -1374,6 +1503,8 @@ export function App() {
             onSortModeChange={setCampaignSortMode}
             onSelectCampaign={handleSelectListedCampaign}
             onAdoptUnlistedCampaign={handleAdoptCampaignAddress}
+            campaignLinkQuery={campaignLinkQuery}
+            explorerCluster={environment?.cluster ?? null}
           />
         )
       case 'holder-trial':
@@ -1537,15 +1668,34 @@ export function App() {
   // downstream: they may predate an attempt, so the panel treats them as display truth and
   // takes its own reading through `readFreshCampaignSetupTruth` before it will confirm a row
   // or re-enter a replaceable terminal. App supplies the reader and calls it never.
+  const explorerCluster = providerEnvironment?.cluster ?? null
+  const plannedMetadataForSelection = plannedMetadataByCampaign[selectedCampaignId] ?? null
   const teamAdminActionSlot: ReactNode = isDevnetTxEnabled ? (
     <>
-      <RedaxTeamAdminCampaignCreatePanel approvedTeamWallet={approvedTeamWallet} onOpenUnlistedCampaignWorkspace={handleOpenUnlistedCampaignWorkspace} />
+      <RedaxTeamAdminWorkspaceSummary
+        appBaseUrl={readRedaxAppBaseUrl()}
+        approvedTeamWallet={approvedTeamWallet}
+        campaign={holderCampaignSelectionIsExact ? selectedCampaign : null}
+        checkState={selectionCheck}
+        explorerCluster={explorerCluster}
+        onCheckAndRefresh={handleWorkspaceCheck}
+        tokenConfigs={tokenConfigs}
+      />
+      <RedaxTeamAdminCampaignCreatePanel
+        approvedTeamWallet={approvedTeamWallet}
+        explorerCluster={explorerCluster}
+        metadataUriAllowlist={metadataUriAllowlist}
+        onOpenUnlistedCampaignWorkspace={handleOpenUnlistedCampaignWorkspace}
+      />
       <RedaxTeamAdminMutationActionsProvider
         approvedTeamWallet={approvedTeamWallet}
         metadataUriAllowlist={metadataUriAllowlist}
       >
         <RedaxTeamAdminCampaignSetupPanel
           approvedTeamWallet={approvedTeamWallet}
+          explorerCluster={explorerCluster}
+          onVerifiedChainChange={handleVerifiedChainChange}
+          workspaceCheck={workspaceCheck}
           campaignDataReady={teamAdminCampaignDataReady}
           effectiveSelectedCampaignId={effectiveSelectedCampaignId}
           programId={teamAdminRuntimeProgramId}
@@ -1556,6 +1706,9 @@ export function App() {
         />
         <RedaxTeamAdminCampaignMetadataPanel
           approvedTeamWallet={approvedTeamWallet}
+          onVerifiedChainChange={handleVerifiedChainChange}
+          plannedMetadata={plannedMetadataForSelection}
+          workspaceCheck={workspaceCheck}
           campaignDataReady={teamAdminCampaignDataReady}
           effectiveSelectedCampaignId={effectiveSelectedCampaignId}
           metadataUriAllowlist={metadataUriAllowlist}
@@ -1566,6 +1719,8 @@ export function App() {
         />
         <RedaxTeamAdminCampaignActivationPanel
           approvedTeamWallet={approvedTeamWallet}
+          onVerifiedChainChange={handleVerifiedChainChange}
+          workspaceCheck={workspaceCheck}
           campaignDataReady={teamAdminCampaignDataReady}
           effectiveSelectedCampaignId={effectiveSelectedCampaignId}
           programId={teamAdminRuntimeProgramId}
@@ -1575,6 +1730,8 @@ export function App() {
         />
         <RedaxTeamAdminCampaignLifecyclePanel
           approvedTeamWallet={approvedTeamWallet}
+          onVerifiedChainChange={handleVerifiedChainChange}
+          workspaceCheck={workspaceCheck}
           campaignDataReady={teamAdminCampaignDataReady}
           effectiveSelectedCampaignId={effectiveSelectedCampaignId}
           programId={teamAdminRuntimeProgramId}

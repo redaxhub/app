@@ -58,6 +58,28 @@
 /** The record's own schema literal, independent of the key's namespace generation. */
 const REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA = 'redax-team-admin-recovery-journal-v1' as const
 
+/**
+ * The SECOND record generation, stored at the SAME key and under the SAME lock.
+ *
+ * A v2 record is a v1 record plus one member, `frozenExpectations`, written at `begin` —
+ * strictly BEFORE anything is signed or broadcast. It carries the public expectation the
+ * S1 post-state assessor compares against and that v1 never recorded: the protocol fee
+ * authority the plan was frozen against. Without it, a later explicit reconciliation of a
+ * transaction that finalized after the first observation could only measure the chain read
+ * against itself, so v1 deliberately left that case support-only.
+ *
+ * THE SLOT IS SHARED ACROSS GENERATIONS, and that is load-bearing: an unresolved v1 record
+ * still blocks a v2 begin exactly as it blocked a v1 one. A v1 record is never upgraded,
+ * rewritten or guessed into a v2 one — it keeps its exact bytes through every transition,
+ * and a reconciliation that would need the missing expectation leaves it open instead.
+ */
+const REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2 = 'redax-team-admin-recovery-journal-v2' as const
+
+/** Either record generation this module reads. */
+export type RedaxTeamAdminRecoveryJournalSchema =
+  | typeof REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA
+  | typeof REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2
+
 /** The commitment scheme this module accepts. Structurally identical, never imported. */
 const REDAX_INTENDED_LEGACY_MESSAGE_COMMITMENT_KIND =
   'redax-intended-legacy-message-sha256-v1' as const
@@ -177,6 +199,18 @@ export interface RedaxTeamAdminRecoveryPlanFactsV1 {
   /** Canonical signed-i64 decimal string, or `null` for no deadline. */
   readonly endTs: string | null
   readonly maxOutputSupply: string
+}
+
+/**
+ * The v2 frozen post-state expectations, recorded before the point of no return.
+ *
+ * Public identities only. `protocolFeeAuthority` is the authority the plan was frozen
+ * against by the chain guard's Phase A — the value the assessor requires the ProtocolConfig
+ * to still declare. It is never taken from a later chain read: a value read after the fact
+ * and then used as its own expectation proves nothing.
+ */
+export interface RedaxTeamAdminRecoveryFrozenExpectationsV2 {
+  readonly protocolFeeAuthority: string
 }
 
 /** The blockhash-validity metadata a recovery reconciles against. */
@@ -302,13 +336,15 @@ export type RedaxTeamAdminRecoveryIssueCode =
  * never been evidence that a transaction did not land.
  */
 export interface RedaxTeamAdminRecoveryRecordV1 {
-  readonly schema: typeof REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA
+  readonly schema: RedaxTeamAdminRecoveryJournalSchema
   readonly namespace: RedaxTeamAdminRecoveryNamespace
   readonly attemptNonce: string
   readonly revision: number
   readonly lifecycle: RedaxTeamAdminRecoveryLifecycle
   readonly planFingerprint: string
   readonly plan: RedaxTeamAdminRecoveryPlanFactsV1
+  /** `null` exactly for a v1 record; always present on a v2 one. */
+  readonly frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null
   readonly blockhashValidity: RedaxTeamAdminRecoveryBlockhashValidityV1
   readonly intendedMessage: RedaxTeamAdminIntendedMessageCommitmentV1
   readonly knownSignature: string | null
@@ -328,6 +364,12 @@ export interface RedaxTeamAdminRecoveryBeginInput {
   readonly namespace: RedaxTeamAdminRecoveryNamespace
   readonly planFingerprint: string
   readonly plan: RedaxTeamAdminRecoveryPlanFactsV1
+  /**
+   * Present → a v2 record carrying these expectations. Absent → a v1 record, exactly as
+   * before. The production S1 root always supplies it; v1 begins stay representable so
+   * the existing record generation keeps its exact bytes and behaviour.
+   */
+  readonly frozenExpectations?: RedaxTeamAdminRecoveryFrozenExpectationsV2
   readonly blockhashValidity: RedaxTeamAdminRecoveryBlockhashValidityV1
   readonly intendedMessage: RedaxTeamAdminIntendedMessageCommitmentV1
   /** Explicitly `null` for a fresh slot; the exact tombstone identity to replace one. */
@@ -731,6 +773,10 @@ const RECORD_KEYS: readonly string[] = [
   'issueCodes',
 ]
 
+/** The v2 record: the v1 members plus `frozenExpectations`, and nothing else. */
+const RECORD_KEYS_V2: readonly string[] = [...RECORD_KEYS, 'frozenExpectations']
+const FROZEN_EXPECTATION_KEYS: readonly string[] = ['protocolFeeAuthority']
+
 const NAMESPACE_KEYS: readonly string[] = ['cluster', 'program', 'teamWallet']
 const COMMITMENT_KEYS: readonly string[] = ['kind', 'byteLength', 'sha256Hex']
 const BLOCKHASH_KEYS: readonly string[] = ['preflightContextSlot', 'lastValidBlockHeight']
@@ -891,13 +937,14 @@ const KNOWN_SIGNATURE_OBSERVATIONS: readonly RedaxTeamAdminRecoveryObservation[]
 
 /** The mutable shape a record is assembled in, before it is frozen and published. */
 interface JournalDraft {
-  schema: typeof REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA
+  schema: RedaxTeamAdminRecoveryJournalSchema
   namespace: RedaxTeamAdminRecoveryNamespace
   attemptNonce: string
   revision: number
   lifecycle: RedaxTeamAdminRecoveryLifecycle
   planFingerprint: string
   plan: RedaxTeamAdminRecoveryPlanFactsV1
+  frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null
   blockhashValidity: RedaxTeamAdminRecoveryBlockhashValidityV1
   intendedMessage: RedaxTeamAdminIntendedMessageCommitmentV1
   knownSignature: string | null
@@ -910,6 +957,9 @@ interface JournalDraft {
 function publishRecord(draft: JournalDraft): RedaxTeamAdminRecoveryRecordV1 {
   Object.freeze(draft.namespace)
   Object.freeze(draft.plan)
+  if (draft.frozenExpectations !== null) {
+    Object.freeze(draft.frozenExpectations)
+  }
   Object.freeze(draft.blockhashValidity)
   Object.freeze(draft.intendedMessage)
   Object.freeze(draft.issueCodes)
@@ -932,6 +982,15 @@ function orderIssueCodes(
  */
 function isCoherent(draft: JournalDraft): boolean {
   const signed = draft.knownSignature !== null
+
+  // THE GENERATION AND ITS MEMBER AGREE, in both directions. A v1 record carrying an
+  // expectation, or a v2 record without one, is neither generation.
+  if (
+    (draft.schema === REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA) !==
+    (draft.frozenExpectations === null)
+  ) {
+    return false
+  }
 
   switch (draft.lifecycle) {
     case 'PRE_INVOCATION':
@@ -1037,7 +1096,7 @@ function isTombstoneCoherent(draft: JournalDraft, signed: boolean): boolean {
  * to guess whether a difference was benign.
  */
 function canonicalize(draft: JournalDraft): string {
-  return JSON.stringify({
+  const v1Shape = {
     schema: draft.schema,
     namespace: {
       cluster: draft.namespace.cluster,
@@ -1071,6 +1130,16 @@ function canonicalize(draft: JournalDraft): string {
     observation: draft.observation,
     resolution: draft.resolution,
     issueCodes: [...draft.issueCodes],
+  }
+  // A v1 record keeps its EXACT historical bytes; a v2 record appends its one member last.
+  if (draft.frozenExpectations === null) {
+    return JSON.stringify(v1Shape)
+  }
+  return JSON.stringify({
+    ...v1Shape,
+    frozenExpectations: {
+      protocolFeeAuthority: draft.frozenExpectations.protocolFeeAuthority,
+    },
   })
 }
 
@@ -1088,6 +1157,8 @@ function draftOf(record: RedaxTeamAdminRecoveryRecordV1): JournalDraft {
     lifecycle: record.lifecycle,
     planFingerprint: record.planFingerprint,
     plan: { ...record.plan },
+    frozenExpectations:
+      record.frozenExpectations === null ? null : { ...record.frozenExpectations },
     blockhashValidity: { ...record.blockhashValidity },
     intendedMessage: { ...record.intendedMessage },
     knownSignature: record.knownSignature,
@@ -1113,15 +1184,20 @@ function buildBeginDraft(
   plan: RedaxTeamAdminRecoveryPlanFactsV1,
   blockhashValidity: RedaxTeamAdminRecoveryBlockhashValidityV1,
   intendedMessage: RedaxTeamAdminIntendedMessageCommitmentV1,
+  frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null,
 ): JournalDraft {
   return {
-    schema: REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA,
+    schema:
+      frozenExpectations === null
+        ? REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA
+        : REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2,
     namespace: { ...namespace },
     attemptNonce,
     revision,
     lifecycle: 'PRE_INVOCATION',
     planFingerprint,
     plan: { ...plan },
+    frozenExpectations: frozenExpectations === null ? null : { ...frozenExpectations },
     blockhashValidity: { ...blockhashValidity },
     intendedMessage: { ...intendedMessage },
     knownSignature: null,
@@ -1282,6 +1358,20 @@ function parsePlanValue(value: unknown): RedaxTeamAdminRecoveryPlanFactsV1 | nul
   }
 }
 
+/** The v2 expectations member: exactly one public account identifier, nothing else. */
+function parseFrozenExpectationsValue(
+  value: unknown,
+): RedaxTeamAdminRecoveryFrozenExpectationsV2 | null {
+  if (!hasExactKeys(value, FROZEN_EXPECTATION_KEYS)) {
+    return null
+  }
+  const protocolFeeAuthority = readProperty(value, 'protocolFeeAuthority')
+  if (!protocolFeeAuthority.ok || !isAccountIdentifier(protocolFeeAuthority.value)) {
+    return null
+  }
+  return { protocolFeeAuthority: protocolFeeAuthority.value }
+}
+
 /** A REQUIRED nullable member: absent and `undefined` are invalid; only `null` is null. */
 function readRequiredNullable(source: unknown, key: string): ProtectedRead {
   const read = readProperty(source, key)
@@ -1329,11 +1419,25 @@ function parseJournalText(raw: string): ParsedJournal {
   // The schema literal is read FIRST, so a future generation stored at this key is
   // reported as incompatible rather than as damage.
   const schema = readProperty(parsed, 'schema')
-  if (!schema.ok || schema.value !== REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA) {
+  if (
+    !schema.ok ||
+    (schema.value !== REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA &&
+      schema.value !== REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2)
+  ) {
     return JOURNAL_INCOMPATIBLE
   }
-  if (!hasExactKeys(parsed, RECORD_KEYS)) {
+  const isV2 = schema.value === REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2
+  if (!hasExactKeys(parsed, isV2 ? RECORD_KEYS_V2 : RECORD_KEYS)) {
     return JOURNAL_CORRUPT
+  }
+  let frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null = null
+  if (isV2) {
+    frozenExpectations = parseFrozenExpectationsValue(
+      readValueOrUndefined(parsed, 'frozenExpectations'),
+    )
+    if (frozenExpectations === null) {
+      return JOURNAL_CORRUPT
+    }
   }
 
   const namespace = parseNamespaceValue(readValueOrUndefined(parsed, 'namespace'))
@@ -1396,13 +1500,14 @@ function parseJournalText(raw: string): ParsedJournal {
   }
 
   const draft: JournalDraft = {
-    schema: REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA,
+    schema: isV2 ? REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA_V2 : REDAX_TEAM_ADMIN_RECOVERY_JOURNAL_SCHEMA,
     namespace,
     attemptNonce: attemptNonce.value,
     revision: revision.value,
     lifecycle,
     planFingerprint: planFingerprint.value,
     plan,
+    frozenExpectations,
     blockhashValidity,
     intendedMessage,
     knownSignature: knownSignature.value === null ? null : (knownSignature.value as string),
@@ -1602,6 +1707,7 @@ function isExactBeginReplacement(
     next.plan,
     next.blockhashValidity,
     next.intendedMessage,
+    next.frozenExpectations,
   )
   return isCoherent(replayed) && canonicalize(replayed) === nextCanonical
 }
@@ -1938,6 +2044,7 @@ interface ValidatedBegin {
   readonly namespace: RedaxTeamAdminRecoveryNamespace
   readonly planFingerprint: string
   readonly plan: RedaxTeamAdminRecoveryPlanFactsV1
+  readonly frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null
   readonly blockhashValidity: RedaxTeamAdminRecoveryBlockhashValidityV1
   readonly intendedMessage: RedaxTeamAdminIntendedMessageCommitmentV1
   readonly replaces: RedaxTeamAdminRecoveryAttemptIdentity | null
@@ -1985,10 +2092,31 @@ function validateBeginInput(input: unknown): ValidatedBegin | null {
   if (replacesRead.value !== null && replaces === null) {
     return null
   }
+  // OPTIONAL, but never half-present: an absent member opens a v1 record, and a present
+  // one must be exactly the v2 expectation shape or the whole begin is refused.
+  const frozenRead = readProperty(input, 'frozenExpectations')
+  if (!frozenRead.ok) {
+    return null
+  }
+  let frozenExpectations: RedaxTeamAdminRecoveryFrozenExpectationsV2 | null = null
+  if (frozenRead.value !== undefined) {
+    frozenExpectations = parseFrozenExpectationsValue(frozenRead.value)
+    if (frozenExpectations === null) {
+      return null
+    }
+  }
   if (plan.campaignAdmin !== plan.outputGovernance) {
     return null
   }
-  return { namespace, planFingerprint: planFingerprint.value, plan, blockhashValidity, intendedMessage, replaces }
+  return {
+    namespace,
+    planFingerprint: planFingerprint.value,
+    plan,
+    frozenExpectations,
+    blockhashValidity,
+    intendedMessage,
+    replaces,
+  }
 }
 
 interface ValidatedTransition {
@@ -2194,6 +2322,7 @@ export async function beginRedaxTeamAdminRecoveryAttempt(
         validated.plan,
         validated.blockhashValidity,
         validated.intendedMessage,
+        validated.frozenExpectations,
       )
       const committed = commitDraft(storage, key, draft, true, false)
       if (!committed.ok) {

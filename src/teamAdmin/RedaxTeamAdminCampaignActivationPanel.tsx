@@ -96,6 +96,8 @@ import { MetricRow } from '../components/MetricRow'
 import { StatusPill } from '../components/StatusPill'
 import { SurfaceCard } from '../components/SurfaceCard'
 import {
+  TEAM_ADMIN_AUTHORITY_LABELS,
+  teamAdminMutationResultLabel,
   TEAM_ADMIN_ACTIVATE_CAMPAIGN,
   TEAM_ADMIN_SOL_PREFLIGHT_INSUFFICIENT,
   TEAM_ADMIN_SOL_PREFLIGHT_READING,
@@ -104,6 +106,12 @@ import {
 } from '../lib/productCopy'
 import type { RedaxCampaignView } from '../data/redaxViewModels'
 import { useRedaxWallet } from '../wallet/RedaxWalletProvider'
+import {
+  isRedaxTeamAdminVerifiedResolutionCode,
+  runRedaxTeamAdminStatusGestureSerialized,
+  useRedaxTeamAdminWorkspaceCheck,
+} from './redaxTeamAdminWorkspaceRefresh'
+import type { RedaxTeamAdminWorkspaceCheckRequest } from './redaxTeamAdminWorkspaceRefresh'
 import { useRedaxTeamAdminMutationActions } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationSolPreflightResult } from './RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminMutationOperation } from './redaxTeamAdminMutationIdentity'
@@ -132,6 +140,7 @@ import {
   describeRedaxTeamAdminMutationStatusReadCode,
   describeRedaxTeamAdminMutationSubmitCode,
   runRedaxTeamAdminSetupStatusGesture,
+  runRedaxTeamAdminSetupWorkspaceReadOnlyCheck,
   selectRedaxTeamAdminSetupChainTruth,
 } from './RedaxTeamAdminCampaignSetupPanel'
 import type {
@@ -149,6 +158,17 @@ import type {
 type ActivationPanelOperation = 'submit' | 'status'
 
 export interface RedaxTeamAdminCampaignActivationPanelProps {
+  /**
+   * A workspace-wide check request (demo customer flow, 2026-10-22). When its sequence is
+   * new and it names this panel's selected campaign, this panel runs its OWN existing
+   * status gesture once — serialized with the other panels. Optional; absent means never.
+   */
+  readonly workspaceCheck?: RedaxTeamAdminWorkspaceCheckRequest | null
+  /**
+   * Told the campaign id after THIS panel saw a mutation VERIFIED and RESOLVED just now, so
+   * the workspace can refresh the dependent panels once. Never called for any other result.
+   */
+  readonly onVerifiedChainChange?: (campaignId: string) => void
   /**
    * The ONE canonical approved Team wallet, resolved once in App.
    *
@@ -318,6 +338,8 @@ export function RedaxTeamAdminCampaignActivationPanel({
   readFreshCampaignSetupTruth,
   selectedCampaign,
   selectedCampaignId,
+  workspaceCheck = null,
+  onVerifiedChainChange,
 }: RedaxTeamAdminCampaignActivationPanelProps) {
   const actions = useRedaxTeamAdminMutationActions()
   // THE PUBLIC, CONNECTION-ONLY WALLET FACADE — acquired for C1 presentation and for NOTHING
@@ -737,6 +759,9 @@ export function RedaxTeamAdminCampaignActivationPanel({
         campaign: values.campaign,
       })
       setSubmitResult(result)
+      if (isRedaxTeamAdminVerifiedResolutionCode(result.code)) {
+        onVerifiedChainChange?.(selectedCampaignId)
+      }
       // THE READING IS SPENT. Whatever the chain said before this attempt says nothing
       // about the chain after it.
       setFreshChainTruth(null)
@@ -781,15 +806,20 @@ export function RedaxTeamAdminCampaignActivationPanel({
     setOperation('status')
     setFreshChainTruth(null)
     try {
-      const outcome = await runRedaxTeamAdminSetupStatusGesture(
-        {
-          reconcileMutation: () => actions.reconcileMutation(),
-          readMutationStatus: () => actions.readMutationStatus(),
-          readFreshCampaignSetupTruth,
-        },
-        gestureCampaignId,
+      const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+        runRedaxTeamAdminSetupStatusGesture(
+          {
+            reconcileMutation: () => actions.reconcileMutation(),
+            readMutationStatus: () => actions.readMutationStatus(),
+            readFreshCampaignSetupTruth,
+          },
+          gestureCampaignId,
+        ),
       )
       setReconcileCode(outcome.reconcileCode)
+      if (isRedaxTeamAdminVerifiedResolutionCode(outcome.reconcileCode)) {
+        onVerifiedChainChange?.(gestureCampaignId)
+      }
       setStatusResult(outcome.status)
       // Written WITH its campaign. A late arrival for a superseded selection is discarded
       // on every render by the same rule that discards a stale one.
@@ -799,6 +829,43 @@ export function RedaxTeamAdminCampaignActivationPanel({
       setOperation(null)
     }
   }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
+
+  // THE ONE BOUNDED WORKSPACE TRIGGER — READ-ONLY. It runs for the newest workspace check of
+  // this campaign once the panel is free; never on a timer, never on mount, never for another
+  // campaign, and it never reconciles — that stays the click above. It claims the panel's latch
+  // synchronously and answers whether a read actually STARTED, so a request that met a busy
+  // panel stays pending in the hook instead of being lost.
+  const handleWorkspaceReadOnlyCheck = useCallback((): boolean => {
+    if (inFlightRef.current !== null) {
+      return false
+    }
+    const gestureCampaignId = selectedCampaignId
+    inFlightRef.current = 'status'
+    setOperation('status')
+    setFreshChainTruth(null)
+    void (async (): Promise<void> => {
+      try {
+        const outcome = await runRedaxTeamAdminStatusGestureSerialized(() =>
+          runRedaxTeamAdminSetupWorkspaceReadOnlyCheck(
+            {
+              readMutationStatus: () => actions.readMutationStatus(),
+              readFreshCampaignSetupTruth,
+            },
+            gestureCampaignId,
+          ),
+        )
+        setStatusResult(outcome.status)
+        setFreshChainTruth(outcome.freshChainTruth)
+      } catch {
+        // A read that throws leaves the cleared display; the explicit status check remains.
+      } finally {
+        inFlightRef.current = null
+        setOperation(null)
+      }
+    })()
+    return true
+  }, [actions, readFreshCampaignSetupTruth, selectedCampaignId])
+  useRedaxTeamAdminWorkspaceCheck(workspaceCheck, selectedCampaignId, busy, handleWorkspaceReadOnlyCheck)
 
   const statusSummary =
     statusResult === null
@@ -850,7 +917,7 @@ export function RedaxTeamAdminCampaignActivationPanel({
           <p className="wizard-preview__header">{TEAM_ADMIN_ACTIVATE_CAMPAIGN.authorityTitle}</p>
           <div className="wizard-preview__stephead">
             <StatusPill
-              label={campaignAuthority}
+              label={TEAM_ADMIN_AUTHORITY_LABELS[campaignAuthority] ?? campaignAuthority}
               tone={authorityConfirmed ? 'positive' : 'neutral'}
             />
           </div>
@@ -1113,12 +1180,18 @@ export function RedaxTeamAdminCampaignActivationPanel({
             <p className="wizard-preview__header">{TEAM_ADMIN_ACTIVATE_CAMPAIGN.resultTitle}</p>
             <div className="wizard-preview__stephead">
               <StatusPill
-                label={
-                  submitResult.busy
-                    ? 'ANOTHER_TEAM_ADMIN_MUTATION_IS_RUNNING'
-                    : submitResult.code
+                label={teamAdminMutationResultLabel(
+                  submitResult.code,
+                  submitResult.busy,
+                  submitResult.rawBroadcastCount,
+                )}
+                tone={
+                  isRedaxTeamAdminVerifiedResolutionCode(submitResult.code)
+                    ? 'positive'
+                    : submitResult.rawBroadcastCount === 1
+                      ? 'caution'
+                      : 'neutral'
                 }
-                tone={submitResult.rawBroadcastCount === 1 ? 'caution' : 'neutral'}
               />
             </div>
             <p className="wizard-preview__purpose">
