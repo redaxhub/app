@@ -407,6 +407,12 @@ export type RedaxTeamAdminMutationSubmitCode =
    * send exists.
    */
   | 'PAYER_SOL_INSUFFICIENT'
+  /**
+   * The customer service's write gate refused immediately before the wallet prompt (customer
+   * self-service, 2026-10-23). Pre-broadcast by construction: the wallet was never asked and
+   * the saved attempt is settled as not sent.
+   */
+  | 'WRITE_GATE_REFUSED'
   | 'PRE_STATE_NOT_ADMISSIBLE'
   | 'METADATA_NOT_CANONICAL'
   | 'MUTATION_IDENTITY_UNAVAILABLE'
@@ -537,6 +543,37 @@ export interface RedaxTeamAdminMutationReconcileResult {
   readonly rawBroadcastCount: 0
   readonly walletPromptCount: 0
   readonly busy: boolean
+}
+
+/**
+ * THE EXTERNAL WRITE GATE (customer self-service, 2026-10-23) — the mutation twin of the S1
+ * root's port. Called once, after Phase B and immediately before the one wallet prompt, with
+ * the exact request and mutation identity; any NO (or throw) settles the record as not sent
+ * and returns `WRITE_GATE_REFUSED`. `null` keeps the root's behaviour exactly as before.
+ *
+ * As in the S1 root, an admission is used only if, when it arrives and again right before the
+ * prompt, this provider still has the same gate and approved Team identity, a metadata write's
+ * exact URI is still on the CURRENT allowlist, and the decision's `stillCurrent()` still holds.
+ */
+export interface RedaxTeamAdminMutationWriteGateRequest {
+  readonly operation: RedaxTeamAdminMutationOperation
+  readonly teamWallet: string
+  readonly campaign: string
+  readonly mutationIdentitySha256Hex: string
+  readonly request: RedaxTeamAdminMutationRequest
+}
+
+export interface RedaxTeamAdminMutationWriteGate {
+  /** Admit or refuse the one attempt, immediately before its one wallet prompt. */
+  admit(
+    request: RedaxTeamAdminMutationWriteGateRequest,
+  ): Promise<{ readonly ok: true; readonly stillCurrent?: () => boolean } | { readonly ok: false }>
+  /** Told once when an attempt ends; return value ignored, throw swallowed. */
+  settled?(outcome: {
+    readonly code: RedaxTeamAdminMutationSubmitCode
+    readonly rawBroadcastCount: 0 | 1
+    readonly walletPromptCount: 0 | 1
+  }): void
 }
 
 /**
@@ -1123,6 +1160,7 @@ function observePassiveMutationSolPreflight(
 export function RedaxTeamAdminMutationActionsProvider({
   approvedTeamWallet = null,
   metadataUriAllowlist = [],
+  writeGate = null,
   children,
 }: {
   /**
@@ -1138,6 +1176,8 @@ export function RedaxTeamAdminMutationActionsProvider({
    * The approved metadata URI allowlist, injected.
    */
   readonly metadataUriAllowlist?: readonly string[]
+  /** The optional external write gate; see `RedaxTeamAdminMutationWriteGate`. */
+  readonly writeGate?: RedaxTeamAdminMutationWriteGate | null
   readonly children?: ReactNode
 }): ReactNode {
   // THE PRIVATE SINGLE-FLIGHT LATCH lives in a ref, and its RENDERED shadow lives in state.
@@ -1150,6 +1190,17 @@ export function RedaxTeamAdminMutationActionsProvider({
   // The ONE private wallet surface this root may use. It is action-named, sign-only, and has
   // no send member of any kind.
   const broker = useRedaxTeamAdminMutationSignOnlyBroker()
+
+  // THE LATEST GATE, IDENTITY AND METADATA ALLOWLIST this provider was rendered with — written
+  // during render (no effect, no subscription). An attempt compares them with the ones it was
+  // admitted under after the gate's await and again right before the prompt; the allowlist is
+  // compared by VALUE, so a new array with the same entries is the same context.
+  const liveGateRef = useRef<{
+    readonly writeGate: RedaxTeamAdminMutationWriteGate | null
+    readonly approvedTeamWallet: string | null
+    readonly metadataUriAllowlist: readonly string[]
+  }>({ writeGate, approvedTeamWallet, metadataUriAllowlist })
+  liveGateRef.current = { writeGate, approvedTeamWallet, metadataUriAllowlist }
 
   const claimFlight = useCallback((): boolean => {
     if (inFlightRef.current) {
@@ -1184,6 +1235,13 @@ export function RedaxTeamAdminMutationActionsProvider({
         code: RedaxTeamAdminMutationSubmitCode,
       ): RedaxTeamAdminMutationSubmitResult => {
         releaseFlight()
+        if (writeGate !== null && typeof writeGate.settled === 'function') {
+          try {
+            writeGate.settled({ code, rawBroadcastCount: broadcastCount, walletPromptCount: promptCount })
+          } catch {
+            // The gate's bookkeeping can never change what this attempt did.
+          }
+        }
         return {
           ok,
           code,
@@ -1949,6 +2007,53 @@ export function RedaxTeamAdminMutationActionsProvider({
           return finish(false, 'CHAIN_GUARD_REFUSED')
         }
 
+        // 22b. THE EXTERNAL WRITE GATE — the last question before the wallet is asked. Any NO,
+        //      including a throw, settles the record as not sent; the prompt never happens.
+        let gateStillAdmits: (() => boolean) | null = null
+        if (writeGate !== null) {
+          try {
+            const decision = await writeGate.admit({
+              operation: plan.operation,
+              teamWallet: approvedTeam.toBase58(),
+              campaign: campaign.toBase58(),
+              mutationIdentitySha256Hex: identity.identity.sha256Hex,
+              request,
+            })
+            if (decision !== null && typeof decision === 'object' && decision.ok === true) {
+              const decisionStillCurrent = decision.stillCurrent
+              gateStillAdmits = (): boolean => {
+                const live = liveGateRef.current
+                if (live.writeGate !== writeGate || live.approvedTeamWallet !== approvedTeamWallet) {
+                  return false
+                }
+                if (request.operation === 'SETUP_METADATA' && !live.metadataUriAllowlist.includes(request.metadataUri)) {
+                  return false
+                }
+                if (typeof decisionStillCurrent !== 'function') {
+                  return true
+                }
+                try {
+                  return decisionStillCurrent() === true
+                } catch {
+                  return false
+                }
+              }
+            }
+          } catch {
+            gateStillAdmits = null
+          }
+          if (gateStillAdmits === null || !gateStillAdmits()) {
+            await resolveNoBroadcast('PRE_RAW_SEND_REFUSED', ['CHAIN_GUARD_REFUSAL'])
+            return finish(false, 'WRITE_GATE_REFUSED')
+          }
+        }
+
+        // 22c. The admission, asked once more immediately before the prompt.
+        if (gateStillAdmits !== null && !gateStillAdmits()) {
+          await resolveNoBroadcast('PRE_RAW_SEND_REFUSED', ['CHAIN_GUARD_REFUSAL'])
+          return finish(false, 'WRITE_GATE_REFUSED')
+        }
+
         // 23. THE ONE SIGN-ONLY REQUEST. The wallet is asked EXACTLY once. This is not a
         //     broadcast and there is nothing behind it that could become one: the broker has
         //     no send member, and there is no retry, no second prompt and no fallback.
@@ -2140,7 +2245,7 @@ export function RedaxTeamAdminMutationActionsProvider({
         )
       }
     },
-    [approvedTeamWallet, broker, claimFlight, metadataUriAllowlist, releaseFlight],
+    [approvedTeamWallet, broker, claimFlight, metadataUriAllowlist, releaseFlight, writeGate],
   )
 
   // ===========================================================================

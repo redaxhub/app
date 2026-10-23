@@ -584,6 +584,8 @@ export function describeRedaxTeamAdminMutationSubmitCode(
       return 'The action failed before the point of no return and stopped. Nothing was sent.'
     case 'MUTATION_POST_SEND_INTERNAL_FAILURE':
       return 'The action failed after the point of no return. Something may have reached the network, so no retry is offered — use Check submission status.'
+    case 'WRITE_GATE_REFUSED':
+      return 'The REDAX service did not admit this step right before the wallet would have been asked — your access, the reviewed plan or another browser’s unresolved step stopped it. Nothing was signed and nothing was sent.'
     default: {
       const exhaustive: never = code
       return exhaustive

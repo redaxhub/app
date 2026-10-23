@@ -18,14 +18,12 @@
 // never fabricated holder/receipt data. TWO modes mount the REDAX wallet shell:
 // DEVNET_WALLET_READONLY, for wallet connection context only (user-initiated
 // connect/disconnect, no signing path, no transaction action), and
-// DEVNET_TX_ENABLED, which additionally mounts the Team/Admin action provider, the
-// wallet action bridge and — inside the Team/Admin slot alone — the post-init
-// mutation provider wrapping exactly the four sibling post-init panels: the campaign
-// setup panel, the campaign metadata panel, the campaign activation panel and the
-// campaign lifecycle panel. ONE provider, FOUR operation consumers — `add_token_config`,
-// `setup_metadata` and `activate_campaign` one per panel, and `pause_campaign`,
-// `unpause_campaign` and `finalize_campaign` together on the fourth. All six post-init
-// operations have a visible product surface in SOURCE, which is not live execution.
+// DEVNET_TX_ENABLED, which additionally mounts the customer session provider, the
+// session-verified Team/Admin S1 root (`RedaxCustomerTeamRoots`) and the wallet action
+// bridge. The one Team surface is the Team workspace screen: a customer signs in with Sign
+// In With Solana, keeps private drafts in the REDAX customer service, reviews ONE frozen plan
+// and runs the existing transaction roots step by step from it; the post-init mutation
+// provider is mounted inside that workspace. Source is not live execution.
 // Screens never see the wallet facade in any of them: every action lives inside an opaque
 // slot this module constructs and passes down, and this module invokes none of them itself.
 
@@ -37,12 +35,7 @@ import { HolderTrialScreen } from './screens/HolderTrialScreen'
 import { HomeScreen, type CampaignSortMode, type CampaignStatusFilter } from './screens/HomeScreen'
 import { ObserverProofScreen } from './screens/ObserverProofScreen'
 import { TokenTeamTrialScreen } from './screens/TokenTeamTrialScreen'
-import {
-  createRedaxDataSource,
-  resolveRedaxRuntimeActionConfig,
-  resolveRedaxTeamAdminMetadataUriAllowlist,
-  resolveRedaxTeamAdminProductCarrier,
-} from './data/redaxDataSourceProvider'
+import { createRedaxDataSource, resolveRedaxRuntimeActionConfig } from './data/redaxDataSourceProvider'
 import { isDevnetProgramMode } from './data/redaxModePredicates'
 import { selectRedaxTokenConfig } from './lib/redaxTokenConfigSelection'
 import { RedaxWalletProvider, useRedaxWallet } from './wallet/RedaxWalletProvider'
@@ -50,27 +43,16 @@ import { RedaxWalletControls } from './wallet/RedaxWalletControls'
 import { RedaxWalletActionsProvider } from './wallet/RedaxWalletActions'
 import { RedaxHolderPrepareControls } from './wallet/RedaxHolderPrepareControls'
 import { RedaxHolderConvertControls } from './wallet/RedaxHolderConvertControls'
-import { RedaxTeamAdminActionsProvider } from './teamAdmin/RedaxTeamAdminActions'
-import {
-  RedaxTeamAdminCampaignCreatePanel,
-  type RedaxTeamAdminSubmittedCreatePlan,
-} from './teamAdmin/RedaxTeamAdminCampaignCreatePanel'
-import {
-  RedaxTeamAdminWorkspaceSummary,
-  type RedaxTeamAdminWorkspaceCheckRequest,
-  type RedaxTeamAdminWorkspaceCheckState,
-} from './teamAdmin/RedaxTeamAdminWorkspaceSummary'
 import {
   parseRedaxCampaignLinkQuery,
   readRedaxAppBaseUrl,
   readRedaxLocationSearch,
   replaceRedaxCampaignLinkInLocation,
 } from './lib/redaxPublicLinks'
-import { RedaxTeamAdminMutationActionsProvider } from './teamAdmin/RedaxTeamAdminMutationActions'
-import { RedaxTeamAdminCampaignSetupPanel } from './teamAdmin/RedaxTeamAdminCampaignSetupPanel'
-import { RedaxTeamAdminCampaignMetadataPanel } from './teamAdmin/RedaxTeamAdminCampaignMetadataPanel'
-import { RedaxTeamAdminCampaignActivationPanel } from './teamAdmin/RedaxTeamAdminCampaignActivationPanel'
-import { RedaxTeamAdminCampaignLifecyclePanel } from './teamAdmin/RedaxTeamAdminCampaignLifecyclePanel'
+import { RedaxCustomerSessionProvider } from './customer/CustomerSessionProvider'
+import { RedaxCustomerTeamRoots } from './customer/CustomerTeamRoots'
+import { CustomerWorkspace } from './customer/CustomerWorkspace'
+import { SurfaceCard } from './components/SurfaceCard'
 import type { RedaxDataSource } from './data/redaxDataSource'
 import type { RedaxDataMode } from './data/redaxModes'
 import type {
@@ -87,10 +69,13 @@ import type {
   RedaxWalletRoleContextView,
 } from './data/redaxViewModels'
 
-type ScreenId = 'home' | 'holder-trial' | 'token-team-trial' | 'admin-overview' | 'observer-proof'
+type ScreenId = 'home' | 'team-workspace' | 'holder-trial' | 'token-team-trial' | 'admin-overview' | 'observer-proof'
 
 const NAV_ITEMS: readonly (ShellNavItem & { id: ScreenId })[] = [
   { id: 'home', label: 'Overview', hint: 'Migration directory' },
+  // Customer self-service (2026-10-23): a customer's own campaigns. Offered only where the
+  // wallet providers are mounted (DEVNET_TX_ENABLED); see the nav filter in App.
+  { id: 'team-workspace', label: 'Team workspace', hint: 'Your campaigns' },
   { id: 'holder-trial', label: 'Holder trial', hint: 'Conversion decision surface' },
   { id: 'token-team-trial', label: 'Token team trial', hint: 'Devnet evaluation path' },
   { id: 'admin-overview', label: 'Admin overview', hint: 'Campaign lifecycle state' },
@@ -1098,58 +1083,18 @@ export function App() {
   // "no URL, no router" reading on exactly that point — the selection itself stays memory
   // only, and the address bar is only updated AFTER an explicit selection.
   const campaignLinkQuery = useMemo(() => parseRedaxCampaignLinkQuery(readRedaxLocationSearch()), [])
-  // The latest selection, for async completions that must not act on a superseded one.
-  const campaignSelectionRef = useRef<RedaxCampaignSelectionV1>(campaignSelection)
-  campaignSelectionRef.current = campaignSelection
-  // ONE workspace-wide check request: a counter and a campaign id. Panels run their own
-  // status check once per new request for their campaign — never on a timer.
-  const [workspaceCheck, setWorkspaceCheck] = useState<RedaxTeamAdminWorkspaceCheckRequest | null>(null)
-  const [selectionCheck, setSelectionCheck] = useState<RedaxTeamAdminWorkspaceCheckState>({
-    checkedAtMs: null,
-    refreshing: false,
-    failed: false,
-  })
-  // Planned metadata a Create submission sent, per campaign, in memory only — a prefill.
-  const [plannedMetadataByCampaign, setPlannedMetadataByCampaign] = useState<
-    Readonly<Record<string, RedaxTeamAdminSubmittedCreatePlan['metadata']>>
-  >({})
 
   // One App-facing RedaxDataSource for the component lifecycle, resolved once from
   // env: MOCK_LOCAL, any of the three devnet program-data modes (DEVNET_READONLY /
   // DEVNET_WALLET_READONLY / DEVNET_TX_ENABLED, which share one read-only adapter),
   // or a typed config-error source when the public config is invalid.
   const redaxDataSource = useMemo(() => createRedaxDataSource(), [])
-  // The ONE Team/Admin approved-carrier resolution for this App mount.
-  //
-  // Resolved from the single canonical runtime resolver, with an empty dependency
-  // list, so it is a pure function of the deployment configuration and of nothing
-  // else: no campaign, no holder, no screen, no wallet state and no selection
-  // refresh can recompute it into a different value. A missing or malformed carrier
-  // resolves to `null`, which fails the Team/Admin action surface CLOSED and leaves
-  // the core data source, the read-only rendering and the Holder flows untouched.
-  //
-  // THIS EXACT VALUE feeds BOTH the Team/Admin provider and the Campaign Create
-  // panel. There is no second resolver call and no second normalization anywhere,
-  // so the identity the panel enables against and the identity the action root
-  // refuses on cannot diverge.
-  const teamAdminCarrier = useMemo(() => resolveRedaxTeamAdminProductCarrier(), [])
-  const approvedTeamWallet: string | null = teamAdminCarrier.approvedTeamWallet
-  // The ONE Team/Admin approved metadata-location resolution for this App mount.
-  //
-  // Resolved from the single canonical runtime resolver with an empty dependency list,
-  // exactly like the carrier above, so it is a pure function of the deployment
-  // configuration. THIS EXACT ARRAY feeds BOTH the mutation provider and the metadata
-  // panel: there is no second resolver call, no second parse and no second allowlist
-  // authority anywhere, so the list an operator selects a location from and the list the
-  // canonicalizer matches a request against cannot diverge. A missing or malformed value
-  // resolves to the empty array, which refuses every location and fails the metadata
-  // surface CLOSED — the core data source, the read-only rendering, the Holder flows,
-  // Campaign Create and the accepted-input surface are all unaffected by it.
-  const teamAdminMetadataAllowlist = useMemo(
-    () => resolveRedaxTeamAdminMetadataUriAllowlist(),
-    [],
-  )
-  const metadataUriAllowlist: readonly string[] = teamAdminMetadataAllowlist.entries
+  // THE BUILD-TIME TEAM CARRIER IS NO LONGER READ HERE (customer self-service, 2026-10-23).
+  // The positive Team identity for both Team/Admin roots is now the wallet the customer
+  // service verified by Sign In With Solana and that is connected right now; it is supplied
+  // inside the wallet subtree by `RedaxCustomerTeamRoots`, never by App and never by the
+  // environment. Which operations that identity may run is the service's per-operation
+  // decision, enforced at the roots' write gate.
   // The ONE canonical runtime program id, resolved once from the same canonical resolver
   // the mutation action root uses and injected at the same boundary as the carrier. It is
   // a PUBLIC deployment fact, never a user input and never derived from campaign data, and
@@ -1262,11 +1207,6 @@ export function App() {
         return
       }
       setSelectionData(result)
-      setSelectionCheck({
-        checkedAtMs: result.status === 'ready' ? Date.now() : null,
-        refreshing: false,
-        failed: result.status !== 'ready',
-      })
     }
     void loadSelection(globalData)
     return () => {
@@ -1375,84 +1315,13 @@ export function App() {
     replaceRedaxCampaignLinkInLocation(campaignId)
   }
 
-  // LOCAL NAVIGATION, and nothing else. The Campaign Create panel offers this only after
-  // a submission it verified as matching-complete, and only when a human clicks it: it
-  // moves the workspace to the campaign that was created, which is by definition not in
-  // the curated directory. Creating a campaign therefore never lists one — no allowlist,
-  // directory or featured membership is touched here or anywhere else in this module.
-  function handleOpenUnlistedCampaignWorkspace(
-    campaignId: string,
-    submittedPlan: RedaxTeamAdminSubmittedCreatePlan | null = null,
-  ): void {
-    setCampaignSelection({ kind: 'UNLISTED', campaignId })
-    replaceRedaxCampaignLinkInLocation(campaignId)
-    // A plan is kept ONLY under the campaign its own submission returned. A plan bound to any
-    // other campaign is dropped, and a missing plan never erases one already kept.
-    if (submittedPlan !== null && submittedPlan.campaign === campaignId) {
-      const plannedMetadata = submittedPlan.metadata
-      setPlannedMetadataByCampaign((current) => ({ ...current, [campaignId]: plannedMetadata }))
-    }
-    // THE OPEN FOLLOWS A VERIFIED CREATE, so each panel checks its saved state once.
-    setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
+  // The Team workspace's "Open holder view": the exact campaign address enters the selection
+  // through the same adoption rule as a typed address, and the Holder screen is shown. It reads
+  // no account, connects no wallet and signs nothing; listing is unaffected.
+  function handleOpenHolderView(campaignId: string): void {
+    handleAdoptCampaignAddress(campaignId)
+    setActiveScreenId('holder-trial')
   }
-
-  /**
-   * ONE BOUNDED, BACKGROUND RE-READ of the selected campaign, its inputs and its summary —
-   * keeping the current view on screen until the new reading arrives, and never applying a
-   * reading to a selection that has since changed. A failed read keeps the old figures and
-   * says so; it is never presented as fresh.
-   *
-   * ONLY THE NEWEST READ PUBLISHES. Every call takes the next `selectionReadRef` id; an answer
-   * that arrives after a newer read started — success or failure — changes nothing: not the
-   * data, not `refreshing`, not `failed` and not "Last checked". The manual "Check and refresh"
-   * and the automatic refresh after a verified mutation go through this one rule.
-   */
-  const refreshSelectedCampaign = useCallback(async (): Promise<void> => {
-    if (globalData.status !== 'ready') {
-      return
-    }
-    const generation = selectionGenerationRef.current
-    const selectionAtStart = campaignSelectionRef.current
-    const read = selectionReadRef.current + 1
-    selectionReadRef.current = read
-    setSelectionCheck((current) => ({ ...current, refreshing: true }))
-    const result = await loadRedaxSelectionData(redaxDataSource, globalData, selectionAtStart, selectedHolderId)
-    if (
-      !isCurrentSelectionGeneration(generation, selectionGenerationRef.current) ||
-      campaignSelectionRef.current !== selectionAtStart ||
-      read !== selectionReadRef.current
-    ) {
-      return
-    }
-    if (result.status === 'ready') {
-      setSelectionData(result)
-      setSelectionCheck({ checkedAtMs: Date.now(), refreshing: false, failed: false })
-    } else {
-      // Keep the figures on screen when there are any; otherwise the newest answer IS the
-      // failure (a superseded load can no longer fill the view).
-      setSelectionData((current) => (current.status === 'ready' ? current : result))
-      setSelectionCheck((current) => ({ ...current, refreshing: false, failed: true }))
-    }
-  }, [globalData, redaxDataSource, selectedHolderId])
-
-  /** The person's one "Check and refresh": re-read, then let each panel check once. */
-  const handleWorkspaceCheck = useCallback((): void => {
-    const campaignId = campaignSelectionRef.current.campaignId
-    void refreshSelectedCampaign()
-    setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
-  }, [refreshSelectedCampaign])
-
-  /** A panel saw a mutation VERIFIED and RESOLVED just now: refresh the dependent views once. */
-  const handleVerifiedChainChange = useCallback(
-    (campaignId: string): void => {
-      if (campaignId !== campaignSelectionRef.current.campaignId) {
-        return
-      }
-      void refreshSelectedCampaign()
-      setWorkspaceCheck((current) => ({ campaignId, sequence: (current?.sequence ?? 0) + 1 }))
-    },
-    [refreshSelectedCampaign],
-  )
 
   // Which of the two honest unlisted statements, if either, this render may make. Pure,
   // derived from the current load, and remembered nowhere.
@@ -1483,7 +1352,7 @@ export function App() {
     )
   }
 
-  function renderScreen(teamAdminActionSlot: ReactNode) {
+  function renderScreen(teamAdminActionSlot: ReactNode, teamWorkspace: ReactNode) {
     switch (activeScreenId) {
       case 'home':
         return (
@@ -1556,6 +1425,8 @@ export function App() {
             onSelectCampaign={handleSelectListedCampaign}
           />
         )
+      case 'team-workspace':
+        return teamWorkspace ?? null
       case 'token-team-trial':
         // walletRoleContext is the context the existing bridge resolves, passed
         // down unchanged so the Token Team surface can display it read-only. It
@@ -1614,137 +1485,64 @@ export function App() {
   // DEVNET_READONLY render the plain shell (no provider, no slot, no discovery).
   //  - DEVNET_WALLET_READONLY: provider + role/holder bridge + the visible wallet
   //    chrome control (walletSlot).
-  //  - DEVNET_TX_ENABLED: provider + the carrier-gated Team/Admin provider + action
-  //    bridge; no global wallet chrome (no walletSlot) and no role bridge. The Holder
-  //    screen receives opaque prepare-output-ATA and convert slots, and the Token team
-  //    screen receives an opaque Team/Admin Campaign Create slot. Each renders inside
-  //    these providers, each is the ONLY consumer of its own action hook, and each
-  //    connects a wallet and invokes its action solely from an explicit user click.
+  //  - DEVNET_TX_ENABLED: provider + the customer session + the session-verified
+  //    Team/Admin S1 root + action bridge; no global wallet chrome and no role bridge.
+  //    The Holder screen receives opaque prepare-output-ATA and convert slots, and the
+  //    Team workspace screen is the one Team surface. Each renders inside these
+  //    providers, each is the ONLY consumer of its own action hook, and each connects a
+  //    wallet and invokes its action solely from an explicit user click.
+  //
+  // THE POSITIVE TEAM IDENTITY IS THE VERIFIED SESSION WALLET. The S1 root and the
+  // workspace's mutation root receive the wallet the customer service verified and that is
+  // connected right now, or `null`; nothing reads a build-time Team address any more. The
+  // session is LAZY: nothing talks to the customer service until the Team workspace is
+  // opened, so the Holder flows neither cost it a request nor depend on it.
   //
   // The mount decision reads the GLOBAL environment, never the combined one: a
   // selection-only refresh must not unmount the wallet subtree and throw away its
-  // connection state. Mode membership is otherwise unchanged — the same two modes
-  // mount, in the same shape, and a global load or a global error still mounts neither.
-  // The role/holder bridge takes its mode from the same global source, so a refresh
-  // cannot transiently clear the contexts it has already resolved.
+  // connection state.
   const providerEnvironment = deriveProviderEnvironment(globalData)
   const isDevnetWalletReadonly = providerEnvironment?.mode === 'DEVNET_WALLET_READONLY'
   const isDevnetTxEnabled = providerEnvironment?.mode === 'DEVNET_TX_ENABLED'
-  // Whether the screen-scoped campaign read this slot depends on actually resolved.
+  // THE TEAM WORKSPACE (customer self-service, 2026-10-23) replaces the earlier Team/Admin panel
+  // stack that used to be built here. It exists ONLY in DEVNET_TX_ENABLED, decided from the
+  // same stable provider-scoped mode, and it is the only Team surface App constructs: a
+  // customer signs in with their own wallet, drafts and reviews ONE frozen plan, and runs the
+  // existing transaction roots step by step from it. App hands it public deployment facts and
+  // the two bounded exact-address readers it already owns, and invokes nothing on it.
   //
-  // It is passed to the SETUP panel and to nothing else, and it is deliberately not a
-  // mount input: the slot's EXISTENCE is still decided by the provider-scoped mode alone,
-  // so a selection refresh changes a prop rather than creating or destroying a subtree.
-  // The panel treats a false here as "chain truth unavailable" and fails closed on it —
-  // it never marks a row confirmed or prepared from data it could not read.
-  const teamAdminCampaignDataReady = !isLoading && loadError === null
-
-  // The opaque Team/Admin action node, constructed here and passed down as a ReactNode.
-  // It exists ONLY in DEVNET_TX_ENABLED, decided from the same stable provider-scoped
-  // mode that decides the mount, so a selection refresh can neither create it nor
-  // destroy it. The screen renders it and knows nothing else about it: App does not
-  // hand any screen the wallet facade, an action method, or the raw adapter.
-  //
-  // ALL SIX POST-INIT OPERATIONS NOW HAVE A VISIBLE PRODUCT SURFACE, and none is
-  // intentionally unexposed. That is a statement about SOURCE and about nothing else: no
-  // post-init mutation has been signed, broadcast or landed from this corridor, and a
-  // mounted control is never evidence that any particular attempt reached devnet.
-  //
-  // THE ACTIVATION AND LIFECYCLE PANELS TAKE NO WALLET EDGE AT ALL, unlike their two
-  // siblings. Each receives the same public deployment facts and a bounded product refresh,
-  // and reads no connection state; the approved-Team identity is proven inside the mutation
-  // root against live devnet state before anything is signed. The lifecycle panel is also
-  // the only one handed the CAMPAIGN-ONLY refresh, because its three operations depend on no
-  // accepted-input fact and must not be blocked by a reading of one.
-  //
-  // The explicit selection facts below are passed RAW rather than pre-decided. App does not
-  // conclude that a campaign may be mutated; it hands the panel both the raw selection and
-  // the effective one, and the panel refuses unless they agree AND the loaded campaign's own
-  // address and admin agree with them. A `campaigns[0]` fallback can therefore never enable
-  // a mutation, and the mutation root's fresh authority-grade chain read stays the final
-  // authority before any wallet prompt.
-  //
-  // `selectedCampaign` and `tokenConfigs` are the LOADED snapshot and are labelled as such
-  // downstream: they may predate an attempt, so the panel treats them as display truth and
-  // takes its own reading through `readFreshCampaignSetupTruth` before it will confirm a row
-  // or re-enter a replaceable terminal. App supplies the reader and calls it never.
+  // The earlier panels remain in the source tree (their pure modules and describers are reused, the
+  // lifecycle panel is mounted by the workspace's campaign page), but App no longer mounts the
+  // Create / accepted-input / metadata / activation panels: they accept terms outside a
+  // reviewed plan, and the roots' write gate admits only plan-derived requests.
   const explorerCluster = providerEnvironment?.cluster ?? null
-  const plannedMetadataForSelection = plannedMetadataByCampaign[selectedCampaignId] ?? null
+  const teamWorkspace: ReactNode = isDevnetTxEnabled ? (
+    <CustomerWorkspace
+      appBaseUrl={readRedaxAppBaseUrl()}
+      explorerCluster={explorerCluster}
+      onOpenHolderView={handleOpenHolderView}
+      programId={teamAdminRuntimeProgramId}
+      readCampaignTruth={readFreshCampaignSetupTruth}
+      readLifecycleTruth={readFreshCampaignLifecycleTruth}
+    />
+  ) : undefined
+  // The Token team screen keeps its evaluation content and points to the workspace.
   const teamAdminActionSlot: ReactNode = isDevnetTxEnabled ? (
-    <>
-      <RedaxTeamAdminWorkspaceSummary
-        appBaseUrl={readRedaxAppBaseUrl()}
-        approvedTeamWallet={approvedTeamWallet}
-        campaign={holderCampaignSelectionIsExact ? selectedCampaign : null}
-        checkState={selectionCheck}
-        explorerCluster={explorerCluster}
-        onCheckAndRefresh={handleWorkspaceCheck}
-        tokenConfigs={tokenConfigs}
-      />
-      <RedaxTeamAdminCampaignCreatePanel
-        approvedTeamWallet={approvedTeamWallet}
-        explorerCluster={explorerCluster}
-        metadataUriAllowlist={metadataUriAllowlist}
-        onOpenUnlistedCampaignWorkspace={handleOpenUnlistedCampaignWorkspace}
-      />
-      <RedaxTeamAdminMutationActionsProvider
-        approvedTeamWallet={approvedTeamWallet}
-        metadataUriAllowlist={metadataUriAllowlist}
-      >
-        <RedaxTeamAdminCampaignSetupPanel
-          approvedTeamWallet={approvedTeamWallet}
-          explorerCluster={explorerCluster}
-          onVerifiedChainChange={handleVerifiedChainChange}
-          workspaceCheck={workspaceCheck}
-          campaignDataReady={teamAdminCampaignDataReady}
-          effectiveSelectedCampaignId={effectiveSelectedCampaignId}
-          programId={teamAdminRuntimeProgramId}
-          readFreshCampaignSetupTruth={readFreshCampaignSetupTruth}
-          selectedCampaign={selectedCampaign}
-          selectedCampaignId={selectedCampaignId}
-          tokenConfigs={tokenConfigs}
-        />
-        <RedaxTeamAdminCampaignMetadataPanel
-          approvedTeamWallet={approvedTeamWallet}
-          onVerifiedChainChange={handleVerifiedChainChange}
-          plannedMetadata={plannedMetadataForSelection}
-          workspaceCheck={workspaceCheck}
-          campaignDataReady={teamAdminCampaignDataReady}
-          effectiveSelectedCampaignId={effectiveSelectedCampaignId}
-          metadataUriAllowlist={metadataUriAllowlist}
-          programId={teamAdminRuntimeProgramId}
-          readFreshCampaignSetupTruth={readFreshCampaignSetupTruth}
-          selectedCampaign={selectedCampaign}
-          selectedCampaignId={selectedCampaignId}
-        />
-        <RedaxTeamAdminCampaignActivationPanel
-          approvedTeamWallet={approvedTeamWallet}
-          onVerifiedChainChange={handleVerifiedChainChange}
-          workspaceCheck={workspaceCheck}
-          campaignDataReady={teamAdminCampaignDataReady}
-          effectiveSelectedCampaignId={effectiveSelectedCampaignId}
-          programId={teamAdminRuntimeProgramId}
-          readFreshCampaignSetupTruth={readFreshCampaignSetupTruth}
-          selectedCampaign={selectedCampaign}
-          selectedCampaignId={selectedCampaignId}
-        />
-        <RedaxTeamAdminCampaignLifecyclePanel
-          approvedTeamWallet={approvedTeamWallet}
-          onVerifiedChainChange={handleVerifiedChainChange}
-          workspaceCheck={workspaceCheck}
-          campaignDataReady={teamAdminCampaignDataReady}
-          effectiveSelectedCampaignId={effectiveSelectedCampaignId}
-          programId={teamAdminRuntimeProgramId}
-          readFreshCampaignLifecycleTruth={readFreshCampaignLifecycleTruth}
-          selectedCampaign={selectedCampaign}
-          selectedCampaignId={selectedCampaignId}
-        />
-      </RedaxTeamAdminMutationActionsProvider>
-    </>
+    <SurfaceCard eyebrow="Team workspace" title="Set up and manage your campaigns">
+      <p className="note-line">
+        Sign in with your Team wallet to create a campaign from one form, review it once, approve each Devnet step in
+        your wallet and share the holder link.
+      </p>
+      <div className="customer-actions">
+        <button className="customer-btn customer-btn--primary" onClick={() => setActiveScreenId('team-workspace')} type="button">
+          Open Team workspace
+        </button>
+      </div>
+    </SurfaceCard>
   ) : undefined
   const shell = (
     <AppShell
-      navItems={NAV_ITEMS}
+      navItems={isDevnetTxEnabled ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== 'team-workspace')}
       activeId={activeScreenId}
       onNavigate={(id) => setActiveScreenId(id as ScreenId)}
       mockModeLabel={environment?.mode}
@@ -1765,7 +1563,7 @@ export function App() {
         isDevnetWalletReadonly ? <RedaxWalletControls roleContext={walletRoleContext} /> : undefined
       }
     >
-      {renderScreen(teamAdminActionSlot)}
+      {renderScreen(teamAdminActionSlot, teamWorkspace)}
     </AppShell>
   )
   return isDevnetWalletReadonly ? (
@@ -1780,22 +1578,16 @@ export function App() {
       {shell}
     </RedaxWalletProvider>
   ) : isDevnetTxEnabled ? (
-    // Provider + the carrier-gated Team/Admin provider + action bridge. No global
-    // walletSlot chrome and no role bridge; the Holder screen's opaque
-    // prepare-output-ATA and convert slots and the Token team screen's opaque Team/Admin
-    // slot render inside these providers and consume their action hooks within their own
-    // slot components. App only mounts the providers, resolves the approved Team carrier
-    // once, and passes the opaque slots — it invokes no wallet action and no Team/Admin
-    // action itself. The Team/Admin provider is nested INSIDE the wallet provider because
-    // the private S1 sign-only broker it reads is published there, and the post-init
-    // mutation provider inside the slot is under this same wallet provider for the same
-    // reason: its own private mutation broker is published there too.
-    // Nothing signs or sends on render: every action runs only from a slot's explicit
-    // user click.
+    // Provider + customer session + the session-verified Team/Admin S1 root + action
+    // bridge. App only mounts the providers and passes the opaque slots — it invokes no
+    // wallet action and no Team/Admin action itself. Nothing signs or sends on render:
+    // every action runs only from a slot's explicit user click.
     <RedaxWalletProvider>
-      <RedaxTeamAdminActionsProvider approvedTeamWallet={approvedTeamWallet}>
-        <RedaxWalletActionsProvider>{shell}</RedaxWalletActionsProvider>
-      </RedaxTeamAdminActionsProvider>
+      <RedaxCustomerSessionProvider>
+        <RedaxCustomerTeamRoots runtimeProgramId={teamAdminRuntimeProgramId}>
+          <RedaxWalletActionsProvider>{shell}</RedaxWalletActionsProvider>
+        </RedaxCustomerTeamRoots>
+      </RedaxCustomerSessionProvider>
     </RedaxWalletProvider>
   ) : (
     shell

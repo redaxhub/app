@@ -378,6 +378,14 @@ export type RedaxTeamAdminS1SubmitCode =
    * journal write, wallet prompt, signature, marker or send exists.
    */
   | 'PAYER_SOL_INSUFFICIENT'
+  /**
+   * The customer service's WRITE GATE refused this attempt immediately before the wallet
+   * prompt (customer self-service, 2026-10-23): the signed-in session no longer permits the
+   * operation, the setup's frozen plan does not admit this request, or another browser holds
+   * the wallet's unresolved Team write. Pre-broadcast by construction — the wallet was never
+   * asked, the saved attempt is settled as not sent, and nothing was broadcast.
+   */
+  | 'WRITE_GATE_REFUSED'
   | 'BUILD_FAILED'
   | 'MESSAGE_COMMITMENT_UNAVAILABLE'
   | 'ATTEMPT_BLOCKED'
@@ -632,6 +640,54 @@ interface RedaxTeamAdminGenericRecoveryTransitionInput {
   readonly expectedAttemptNonce: string
   readonly expectedRevision: number
   readonly transition: RedaxTeamAdminGenericRecoveryTransition
+}
+
+/**
+ * THE EXTERNAL WRITE GATE (customer self-service, 2026-10-23).
+ *
+ * An optional port the app injects so a Team chain write is admitted by the customer service
+ * at the ROOT boundary rather than by a hidden button: the root calls it exactly once per
+ * attempt, after every chain guard has passed and IMMEDIATELY BEFORE the one wallet prompt,
+ * with the exact public identities this attempt will sign for. A refusal, a throw or an
+ * unusable answer all end the attempt there, as `WRITE_GATE_REFUSED`, with the durable
+ * record settled as a pre-invocation refusal — nothing signed, nothing sent.
+ *
+ * It is not a signer, not a sender and not a second trust source for the chain: the gate can
+ * only say NO to an attempt the root would otherwise have made. `null` (the default) means no
+ * gate is configured and the root behaves exactly as before.
+ *
+ * AN ADMISSION IS CHECKED AGAIN WHEN IT IS USED. The answer arrives after an await, so the root
+ * accepts it only if, at that moment, this provider still has the SAME gate and the SAME approved
+ * Team identity it admitted under, and the decision's own `stillCurrent()` (when the gate gives
+ * one) still holds; it asks all of that once more immediately before the prompt. Any NO there is
+ * the same `WRITE_GATE_REFUSED` pre-invocation terminal.
+ */
+export interface RedaxTeamAdminS1WriteGateRequest {
+  readonly operation: 'CREATE_CAMPAIGN'
+  readonly teamWallet: string
+  readonly campaign: string
+  readonly outputMint: string
+  readonly planFingerprint: string
+  readonly request: RedaxTeamAdminS1SetupRequest
+}
+
+export type RedaxTeamAdminWriteGateDecision =
+  | { readonly ok: true; readonly stillCurrent?: () => boolean }
+  | { readonly ok: false }
+
+export interface RedaxTeamAdminS1WriteGate {
+  /** Admit or refuse the one attempt, immediately before its one wallet prompt. */
+  admit(request: RedaxTeamAdminS1WriteGateRequest): Promise<RedaxTeamAdminWriteGateDecision>
+  /**
+   * Told once when an attempt ends, whatever the outcome, so the gate can settle its own
+   * coordination from the root's own counts. Its return value is ignored and a throw is
+   * swallowed: it can never change what the attempt did.
+   */
+  settled?(outcome: {
+    readonly code: RedaxTeamAdminS1SubmitCode
+    readonly rawBroadcastCount: 0 | 1
+    readonly walletPromptCount: 0 | 1
+  }): void
 }
 
 /**
@@ -1679,12 +1735,15 @@ async function settleSubmittedOutcome(input: {
  */
 export function RedaxTeamAdminActionsProvider({
   approvedTeamWallet = null,
+  writeGate = null,
   children,
 }: {
   /**
    * The trusted approved-Team public key, as base58, or `null`.
    */
   readonly approvedTeamWallet?: string | null
+  /** The optional external write gate; see `RedaxTeamAdminS1WriteGate`. */
+  readonly writeGate?: RedaxTeamAdminS1WriteGate | null
   readonly children?: ReactNode
 }): ReactNode {
   // The PRIVATE attempt lives in a ref, never in state. A ref is the honest home for a
@@ -1698,6 +1757,16 @@ export function RedaxTeamAdminActionsProvider({
   // The one private wallet surface this root may use. It is action-named, sign-only, and
   // has no send member of any kind.
   const broker = useRedaxTeamAdminS1SignOnlyBroker()
+
+  // THE LATEST GATE AND IDENTITY this provider was rendered with — written during render, so no
+  // effect is involved. An attempt compares them with the ones it admitted under after the
+  // gate's await and again right before the prompt (strict equality: the gate is an authority
+  // object, the identity a string).
+  const liveGateRef = useRef<{ readonly writeGate: RedaxTeamAdminS1WriteGate | null; readonly approvedTeamWallet: string | null }>({
+    writeGate,
+    approvedTeamWallet,
+  })
+  liveGateRef.current = { writeGate, approvedTeamWallet }
 
   const publish = useCallback((next: RedaxTeamAdminAttemptV1): RedaxTeamAdminAttemptProjectionV1 => {
     attemptRef.current = next
@@ -1762,6 +1831,13 @@ export function RedaxTeamAdminActionsProvider({
         const projection = released.ok
           ? publish(released.attempt)
           : publicAttemptProjection(attemptRef.current)
+        if (writeGate !== null && typeof writeGate.settled === 'function') {
+          try {
+            writeGate.settled({ code, rawBroadcastCount: broadcastCount, walletPromptCount: promptCount })
+          } catch {
+            // The gate's bookkeeping can never change what this attempt did.
+          }
+        }
         return {
           ok,
           code,
@@ -2332,6 +2408,46 @@ export function RedaxTeamAdminActionsProvider({
           return finish(false, 'CHAIN_GUARD_REFUSED', 'CHAIN_GUARD_REFUSAL')
         }
 
+        // 24b. THE EXTERNAL WRITE GATE — the last question before the wallet is asked. It is
+        //      handed the exact public identities this attempt signs for, and a NO of any kind
+        //      (including a throw) settles the record as a pre-invocation refusal.
+        let gateStillAdmits: (() => boolean) | null = null
+        if (writeGate !== null) {
+          try {
+            const decision = await writeGate.admit({
+              operation: 'CREATE_CAMPAIGN',
+              teamWallet: approvedTeam.toBase58(),
+              campaign: plan.campaign,
+              outputMint: outputMintAddress,
+              planFingerprint,
+              request,
+            })
+            if (decision !== null && typeof decision === 'object' && decision.ok === true) {
+              const decisionStillCurrent = decision.stillCurrent
+              gateStillAdmits = (): boolean => {
+                const live = liveGateRef.current
+                if (live.writeGate !== writeGate || live.approvedTeamWallet !== approvedTeamWallet) {
+                  return false
+                }
+                if (typeof decisionStillCurrent !== 'function') {
+                  return true
+                }
+                try {
+                  return decisionStillCurrent() === true
+                } catch {
+                  return false
+                }
+              }
+            }
+          } catch {
+            gateStillAdmits = null
+          }
+          if (gateStillAdmits === null || !gateStillAdmits()) {
+            await resolveRefusal()
+            return finish(false, 'WRITE_GATE_REFUSED', 'CHAIN_GUARD_REFUSAL')
+          }
+        }
+
         // 25. THE ONE PARTIAL SIGNATURE. Exactly one call, on the exact keypair this
         //     attempt holds custody of, read back from the private attempt rather than from
         //     a local variable — so what signs is provably what the attempt is about. There
@@ -2347,6 +2463,13 @@ export function RedaxTeamAdminActionsProvider({
         } catch {
           await resolveRefusal()
           return finish(false, 'BUILD_FAILED', 'CHAIN_GUARD_REFUSAL')
+        }
+
+        // 25b. The admission, asked once more with nothing in between but this check: a context
+        //      that changed since the gate answered still ends here, before the prompt.
+        if (gateStillAdmits !== null && !gateStillAdmits()) {
+          await resolveRefusal()
+          return finish(false, 'WRITE_GATE_REFUSED', 'CHAIN_GUARD_REFUSAL')
         }
 
         // 26. THE ONE SIGN-ONLY REQUEST. The wallet receives a transaction that ALREADY
@@ -2617,7 +2740,7 @@ export function RedaxTeamAdminActionsProvider({
         )
       }
     },
-    [approvedTeamWallet, broker, publish],
+    [approvedTeamWallet, broker, publish, writeGate],
   )
 
   // ===========================================================================

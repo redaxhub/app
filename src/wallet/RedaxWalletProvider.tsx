@@ -556,6 +556,102 @@ export function useRedaxTeamAdminMutationSignOnlyBroker(): RedaxTeamAdminMutatio
   return useContext(RedaxTeamAdminMutationSignOnlyBrokerContext)
 }
 
+// --- INTERNAL/GATED customer SIGN-IN broker (customer self-service, 2026-10-23) ----------
+//
+// A FOURTH private surface, named for ONE action: Sign In With Solana to the REDAX customer
+// service. It signs NO transaction and sends nothing — it asks the wallet's standard
+// `solana:signIn` feature to sign the ONE fixed REDAX sign-in message for the ONE connected
+// account, and returns the wallet's signed message and signature for the server to verify.
+//
+// IT IS NOT A GENERIC MESSAGE SIGNER. There is no `signMessage` path at all: a wallet without
+// `solana:signIn` cannot sign in, rather than being handed arbitrary bytes. Before the wallet
+// is asked, the input must be exactly a REDAX challenge for THIS page — its domain is this
+// page's host, its URI this page's origin, its chain Solana Devnet, its statement the fixed
+// REDAX statement, its address the connected account, its nonce a server nonce — and the
+// account the wallet signed with must be that same account. The wallet itself also binds the
+// domain to the page it is shown on.
+
+/** The exact REDAX sign-in statement, mirrored from the customer contract (`../customer/shared`). */
+const REDAX_CUSTOMER_SIGN_IN_STATEMENT =
+  'Sign in to REDAX on Solana Devnet. This free message signature does not send a transaction or move funds.'
+
+/** One REDAX SIWS input, exactly as the customer service issues it. */
+export interface RedaxCustomerSignInBrokerInput {
+  readonly domain: string
+  readonly address: string
+  readonly statement: string
+  readonly uri: string
+  readonly version: string
+  readonly chainId: string
+  readonly nonce: string
+  readonly issuedAt: string
+  readonly expirationTime: string
+}
+
+export interface RedaxCustomerSignInBrokerOutput {
+  readonly address: string
+  readonly signedMessage: Uint8Array
+  readonly signature: Uint8Array
+}
+
+export interface RedaxCustomerSignInBroker {
+  readonly isConnected: boolean
+  /** True only when the connected wallet offers the standard `solana:signIn` feature. */
+  readonly canSignIn: boolean
+  readonly publicKeyBase58: string | null
+  signInWithRedaxChallenge(input: RedaxCustomerSignInBrokerInput): Promise<RedaxCustomerSignInBrokerOutput>
+}
+
+const REDAX_CUSTOMER_SIGN_IN_UNAVAILABLE = 'REDAX_CUSTOMER_SIGN_IN_UNAVAILABLE'
+
+const INERT_REDAX_CUSTOMER_SIGN_IN_BROKER: RedaxCustomerSignInBroker = {
+  isConnected: false,
+  canSignIn: false,
+  publicKeyBase58: null,
+  async signInWithRedaxChallenge() {
+    throw new Error(REDAX_CUSTOMER_SIGN_IN_UNAVAILABLE)
+  },
+}
+
+/** Is this exactly a REDAX sign-in challenge for this page and this account? */
+function isRedaxCustomerSignInInputForPage(input: RedaxCustomerSignInBrokerInput, account: string): boolean {
+  const location = (globalThis as { location?: { host?: unknown; origin?: unknown } }).location
+  const host = typeof location?.host === 'string' ? location.host : null
+  const origin = typeof location?.origin === 'string' ? location.origin : null
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+  return (
+    host !== null &&
+    origin !== null &&
+    typeof input === 'object' &&
+    input !== null &&
+    input.domain === host &&
+    input.uri === `${origin}/` &&
+    input.address === account &&
+    input.statement === REDAX_CUSTOMER_SIGN_IN_STATEMENT &&
+    input.version === '1' &&
+    input.chainId === 'solana:devnet' &&
+    typeof input.nonce === 'string' &&
+    /^[0-9a-f]{64}$/.test(input.nonce) &&
+    typeof input.issuedAt === 'string' &&
+    iso.test(input.issuedAt) &&
+    typeof input.expirationTime === 'string' &&
+    iso.test(input.expirationTime)
+  )
+}
+
+const RedaxCustomerSignInBrokerContext = createContext<RedaxCustomerSignInBroker>(
+  INERT_REDAX_CUSTOMER_SIGN_IN_BROKER,
+)
+
+/**
+ * INTERNAL/GATED hook — import ONLY from app/src/customer/CustomerSessionProvider.tsx.
+ * Returns the sign-in broker: one fixed SIWS message, never a transaction, never arbitrary
+ * bytes. Inert outside a mounted provider or when disconnected.
+ */
+export function useRedaxCustomerSignInBroker(): RedaxCustomerSignInBroker {
+  return useContext(RedaxCustomerSignInBrokerContext)
+}
+
 interface RedaxWalletProviderProps {
   children: ReactNode
 }
@@ -858,12 +954,78 @@ export function RedaxWalletProvider({ children }: RedaxWalletProviderProps) {
     [actionTransport],
   )
 
+  // The customer SIGN-IN broker. Same adapter, same live identity check, ONE feature: the
+  // standard `solana:signIn`, for a REDAX challenge only. No transaction capability at all.
+  const customerSignInBroker = useMemo<RedaxCustomerSignInBroker>(() => {
+    const capturedAdapter = activeAdapterRef.current
+    if (status !== 'connected' || publicKeyBase58 === null || capturedAdapter === null) {
+      return INERT_REDAX_CUSTOMER_SIGN_IN_BROKER
+    }
+    const capturedKeyRead = readAdapterProperty(capturedAdapter, 'publicKey')
+    const capturedKey = capturedKeyRead.ok ? safeBase58(capturedKeyRead.value) : null
+    if (capturedKey === null) {
+      return INERT_REDAX_CUSTOMER_SIGN_IN_BROKER
+    }
+    const signInRead = readAdapterProperty(capturedAdapter, 'signIn')
+    let boundSignIn: ((input: unknown) => Promise<unknown>) | null = null
+    if (signInRead.ok && typeof signInRead.value === 'function') {
+      try {
+        boundSignIn = (signInRead.value as (this: unknown, input: unknown) => Promise<unknown>).bind(capturedAdapter)
+      } catch {
+        boundSignIn = null
+      }
+    }
+    const liveKey = (): string | null => {
+      const active = activeAdapterRef.current
+      if (active === null || active !== capturedAdapter || !adapterIsConnected(active)) {
+        return null
+      }
+      const read = readAdapterProperty(active, 'publicKey')
+      return read.ok ? safeBase58(read.value) : null
+    }
+    return {
+      isConnected: true,
+      canSignIn: boundSignIn !== null,
+      publicKeyBase58: capturedKey,
+      async signInWithRedaxChallenge(input) {
+        const signIn = boundSignIn
+        const live = liveKey()
+        if (signIn === null || live === null || live !== capturedKey || !isRedaxCustomerSignInInputForPage(input, live)) {
+          throw new Error(REDAX_CUSTOMER_SIGN_IN_UNAVAILABLE)
+        }
+        const output = await signIn({ ...input })
+        const account = readAdapterProperty(output, 'account')
+        const signedMessage = readAdapterProperty(output, 'signedMessage')
+        const signature = readAdapterProperty(output, 'signature')
+        const address = account.ok ? readAdapterProperty(account.value, 'address') : { ok: false as const }
+        if (
+          !address.ok ||
+          address.value !== live ||
+          !signedMessage.ok ||
+          !(signedMessage.value instanceof Uint8Array) ||
+          !signature.ok ||
+          !(signature.value instanceof Uint8Array) ||
+          signature.value.byteLength !== 64
+        ) {
+          throw new Error(REDAX_CUSTOMER_SIGN_IN_UNAVAILABLE)
+        }
+        return {
+          address: live,
+          signedMessage: new Uint8Array(signedMessage.value),
+          signature: new Uint8Array(signature.value),
+        }
+      },
+    }
+  }, [status, publicKeyBase58])
+
   return (
     <RedaxWalletContext.Provider value={value}>
       <RedaxWalletActionTransportContext.Provider value={actionTransport}>
         <RedaxTeamAdminS1SignOnlyBrokerContext.Provider value={teamAdminS1Broker}>
           <RedaxTeamAdminMutationSignOnlyBrokerContext.Provider value={teamAdminMutationBroker}>
-            {children}
+            <RedaxCustomerSignInBrokerContext.Provider value={customerSignInBroker}>
+              {children}
+            </RedaxCustomerSignInBrokerContext.Provider>
           </RedaxTeamAdminMutationSignOnlyBrokerContext.Provider>
         </RedaxTeamAdminS1SignOnlyBrokerContext.Provider>
       </RedaxWalletActionTransportContext.Provider>

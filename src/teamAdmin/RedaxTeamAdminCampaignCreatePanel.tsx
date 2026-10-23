@@ -461,6 +461,8 @@ export function describeRedaxTeamAdminSubmitCode(code: RedaxTeamAdminS1SubmitCod
       return 'The expected durable record could not be read back. That is not evidence about what happened on devnet — only a later exact read can say.'
     case 'POST_INVOCATION_INTERNAL_FAILURE':
       return 'Something failed unexpectedly after the submission was invoked, so something may have been sent. Check the submission status; nothing is sent again.'
+    case 'WRITE_GATE_REFUSED':
+      return 'The REDAX service did not admit this step right before the wallet would have been asked — your access, the reviewed plan or another browser’s unresolved step stopped it. Nothing was signed and nothing was sent.'
     default: {
       const exhaustive: never = code
       return exhaustive

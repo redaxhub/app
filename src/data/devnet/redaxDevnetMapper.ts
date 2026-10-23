@@ -175,7 +175,7 @@ const DEVNET_TX_ENABLED_DESCRIPTOR: RedaxModeDescriptor = {
   cluster: 'devnet',
   label: 'Devnet reads (DEVNET_TX_ENABLED)',
   boundaryLabel:
-    'Devnet program/RPC reads, plus wallet-approved, devnet-only actions: on the Holder surface, preparing your output token account and converting the accepted input you choose; on the Team surface, when an approved Team wallet is configured, creating a devnet campaign and then adding an accepted input token config, setting the output token metadata once, activating, pausing, unpausing or finalizing that campaign. Every one of them runs only when you approve it in your wallet. No readiness claim.',
+    'Devnet program/RPC reads, plus wallet-approved, devnet-only actions: on the Holder surface, preparing your output token account and converting the accepted input you choose; in the Team workspace, for a Team wallet that has signed in and been given access, creating a devnet campaign and then adding its accepted input token configs, setting the output token metadata once, activating, pausing, unpausing or finalizing that campaign. Every one of them runs only when you approve it in your wallet. No readiness claim.',
   capabilities: ['program-rpc-read', 'wallet-required-for-actions', 'transaction-actions-enabled'],
   walletRequiredForActions: true,
   rpcAllowed: true,

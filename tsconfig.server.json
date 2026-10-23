@@ -1,0 +1,21 @@
+{
+  // REDAX customer service — type-check of the Vercel Function and its server modules.
+  // Separate from tsconfig.json (the browser bundle): Node types, no DOM, and the shared
+  // customer modules that both sides import. Emits nothing; Vercel compiles `api/` itself.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["api", "server", "src/customer/shared"]
+}

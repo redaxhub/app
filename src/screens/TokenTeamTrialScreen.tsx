@@ -20,6 +20,11 @@
 // A campaign opened by exact address is legitimately absent from it, and the setup
 // checks below say so rather than computing a directory-derived result out of nothing.
 //
+// WHAT THAT NODE CONTAINS IS NOT THIS SCREEN'S BUSINESS. In DEVNET_TX_ENABLED it is a
+// pointer to the Team workspace screen, where a customer signs in and runs their own setup.
+// This screen imports nothing from the Team/Admin tree, receives one opaque node, and cannot
+// reach a builder, a wallet, a signer or a send.
+//
 // The screen also hosts, in the modes that have no action slot, the Team/Admin
 // wizard preview — the supply-side setup step model, whose fields are local draft
 // inputs held in that component's own memory. The preview and the real Team/Admin
@@ -400,7 +405,7 @@ export function TokenTeamTrialScreen({
             <>
               Every figure below is read from the deployed devnet program over RPC (read-only).
               {isDevnetTxEnabled
-                ? ' The Team/Admin surface below offers campaign create plus six post-init campaign steps, each wallet-approved, devnet-only, and run solely from its own click. Each exists as a product surface here; that a control exists is never evidence that it has been run.'
+                ? ' Teams set up and manage their own campaigns in the Team workspace: one form, one review, then each Devnet step approved in their own wallet. That a control exists is never evidence that it has been run.'
                 : ' This mode enables no transaction action.'}
             </>
           ) : isMockLocal ? (
@@ -623,7 +628,7 @@ export function TokenTeamTrialScreen({
               {mode === 'DEVNET_WALLET_READONLY'
                 ? 'Wallet connection is read-only context in the app chrome only, and this mode enables no transaction action'
                 : isDevnetTxEnabled
-                  ? 'Each devnet-only Team/Admin action here — creating a campaign, adding one accepted input token config to a campaign that already exists, setting that campaign’s permanent output token metadata once, activating it, and pausing, unpausing or finalizing it afterwards — runs solely when you click it and approve it in the configured approved Team wallet, and none of them is claimed to have been run'
+                  ? 'Each devnet-only Team/Admin action here — creating a campaign, adding one accepted input token config to a campaign that already exists, setting that campaign’s permanent output token metadata once, activating it, and pausing, unpausing or finalizing it afterwards — runs solely when you click it in the Team workspace and approve it with a Team wallet that has signed in and been given access, and none of them is claimed to have been run'
                   : 'This mode connects no wallet and enables no transaction action'}{' '}
               — nothing else here executes. This surface is an evaluation and demonstration
               foundation — not a production claim and not a verdict on any team's campaign.
