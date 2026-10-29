@@ -9,16 +9,18 @@
 //
 // ONE WALLET, MANY CAMPAIGNS. The list is the wallet's own setups, each with its own id,
 // revision, plan, output mint, metadata and lifecycle. Opening one never touches another, and
-// switching between them never asks the wallet to connect or sign in again.
+// switching between them never asks the wallet to connect or sign in again. Leaving an open
+// draft through the header, or through the app's own menu (`leaveGuard`), goes through the
+// composer's own check, exactly like its Back. A sign-out or wallet switch is never held by it.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RedaxTeamAdminMutationActionsProvider } from '../teamAdmin/RedaxTeamAdminMutationActions'
 import type { RedaxTeamAdminFreshCampaignLifecycleTruthResult } from '../teamAdmin/RedaxTeamAdminCampaignLifecyclePanel'
 import type { RedaxCampaignView, RedaxTokenConfigView } from '../data/redaxViewModels'
 import { StatusPill } from '../components/StatusPill'
 import { CustomerCampaignList } from './CustomerCampaignList'
 import { CustomerCampaignPage } from './CustomerCampaignPage'
-import { CustomerComposer } from './CustomerComposer'
+import { CustomerComposer, type RedaxCustomerComposerLeaveGuard } from './CustomerComposer'
 import { CustomerOperatorAccess } from './CustomerOperatorAccess'
 import { CustomerReview } from './CustomerReview'
 import { CustomerSetupProgress } from './CustomerSetupProgress'
@@ -42,6 +44,8 @@ export interface RedaxCustomerWorkspaceProps {
   readonly readLifecycleTruth: (campaignId: string) => Promise<RedaxTeamAdminFreshCampaignLifecycleTruthResult>
   /** Open the public holder view of a campaign (local navigation). */
   readonly onOpenHolderView?: (campaignId: string) => void
+  /** Filled while a signed-in workspace is mounted: the app's menu leaves through it. */
+  readonly leaveGuard?: { current: RedaxCustomerComposerLeaveGuard | null }
 }
 
 export type RedaxCustomerView =
@@ -79,6 +83,36 @@ function CustomerSignedInWorkspace(props: RedaxCustomerWorkspaceProps) {
     setActiveMetadataUri(null)
     setView(next)
   }, [])
+  const composerLeave = useRef<RedaxCustomerComposerLeaveGuard | null>(null)
+  const appLeave = props.leaveGuard
+  useEffect(() => {
+    if (appLeave === undefined) {
+      return
+    }
+    // Only an open composer has anything to keep; otherwise the app navigates at once.
+    const guard: RedaxCustomerComposerLeaveGuard = (proceed) => {
+      const composer = composerLeave.current
+      if (composer === null) {
+        proceed()
+      } else {
+        composer(proceed)
+      }
+    }
+    appLeave.current = guard
+    return () => {
+      if (appLeave.current === guard) {
+        appLeave.current = null
+      }
+    }
+  }, [appLeave])
+  const leaveTo = (next: RedaxCustomerView): void => {
+    const guard = view.kind === 'compose' ? composerLeave.current : null
+    if (guard === null) {
+      open(next)
+    } else {
+      guard(() => open(next))
+    }
+  }
   if (me === null) {
     return null
   }
@@ -96,12 +130,12 @@ function CustomerSignedInWorkspace(props: RedaxCustomerWorkspaceProps) {
         </div>
         <div className="customer-actions">
           {me.grant !== null ? (
-            <button className="customer-btn" disabled={view.kind === 'list'} onClick={() => open({ kind: 'list' })} type="button">
+            <button className="customer-btn" disabled={view.kind === 'list'} onClick={() => leaveTo({ kind: 'list' })} type="button">
               My campaigns
             </button>
           ) : null}
           {me.operator ? (
-            <button className="customer-btn" disabled={view.kind === 'operator'} onClick={() => open({ kind: 'operator' })} type="button">
+            <button className="customer-btn" disabled={view.kind === 'operator'} onClick={() => leaveTo({ kind: 'operator' })} type="button">
               Customer access
             </button>
           ) : null}
@@ -125,6 +159,7 @@ function CustomerSignedInWorkspace(props: RedaxCustomerWorkspaceProps) {
         {view.kind === 'list' && me.grant !== null ? (
           <CustomerCampaignList
             canCreate={me.permissions.create}
+            canDeleteDrafts={me.permissions.manageExisting}
             onOpen={open}
             readCampaignTruth={props.readCampaignTruth}
           />
@@ -133,6 +168,7 @@ function CustomerSignedInWorkspace(props: RedaxCustomerWorkspaceProps) {
           <CustomerComposer
             key={view.setupId}
             canEdit={me.permissions.create}
+            leaveGuard={composerLeave}
             onBack={() => open({ kind: 'list' })}
             onReview={(setupId) => open({ kind: 'review', setupId })}
             setupId={view.setupId}

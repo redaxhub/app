@@ -33,6 +33,7 @@
 import {
   RedaxCustomerStoreUnavailableError,
   assertRedaxCustomerStorePath,
+  redaxCustomerStoreRecordKind,
   type RedaxCustomerPrivateStore,
   type RedaxCustomerPublicStore,
   type RedaxCustomerStoredObject,
@@ -69,13 +70,40 @@ export interface RedaxCustomerBlobSdk {
   del(pathname: string, options: { readonly storeId: string; readonly token?: string; readonly ifMatch?: string }): Promise<void>
 }
 
-/** The SDK's own precondition error, recognized by name so no class identity is assumed. */
+/**
+ * The SDK's own error class, recognized by NAME so no class identity is assumed. `@vercel/blob`
+ * 2.8.1 never sets `name` on its errors — every instance reports `name === 'Error'` — so the
+ * class name is read from the constructor first; an explicit `name` is honored as well. The
+ * result is a fixed SDK class name (or `Error` / `TypeError`), safe to log.
+ */
+function blobErrorClass(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'NonError'
+  }
+  for (const candidate of [error.constructor?.name, error.name]) {
+    if (typeof candidate === 'string' && /^Blob[A-Za-z]{1,48}$/.test(candidate)) {
+      return candidate
+    }
+  }
+  return error.name === 'TypeError' ? 'TypeError' : 'Error'
+}
+
+/** The class, plus the HTTP status `get` puts in its message ("Failed to fetch blob: 403 …"). */
+function blobErrorCause(error: unknown): string {
+  const status = error instanceof Error ? /Failed to fetch blob: (\d{3})\b/.exec(error.message)?.[1] : undefined
+  return status === undefined ? blobErrorClass(error) : `${blobErrorClass(error)}.http${status}`
+}
+
 function isPreconditionFailure(error: unknown): boolean {
-  return error instanceof Error && error.name === 'BlobPreconditionFailedError'
+  return blobErrorClass(error) === 'BlobPreconditionFailedError'
 }
 
 function isNotFound(error: unknown): boolean {
-  return error instanceof Error && error.name === 'BlobNotFoundError'
+  return blobErrorClass(error) === 'BlobNotFoundError'
+}
+
+function unavailable(primitive: string, path: string, cause: string): RedaxCustomerStoreUnavailableError {
+  return new RedaxCustomerStoreUnavailableError('storage unavailable', `${primitive}.${redaxCustomerStoreRecordKind(path)}.${cause}`)
 }
 
 /** The largest object this service ever reads back. Everything it stores is far smaller. */
@@ -93,7 +121,7 @@ async function readBounded(stream: ReadableStream<Uint8Array>): Promise<Uint8Arr
     total += value.byteLength
     if (total > MAX_READ_BYTES) {
       await reader.cancel()
-      throw new RedaxCustomerStoreUnavailableError('object larger than expected')
+      throw new RedaxCustomerStoreUnavailableError('object larger than expected', 'read.too-large')
     }
     chunks.push(value)
   }
@@ -146,23 +174,38 @@ async function readLatest(
     if (isNotFound(error)) {
       return null
     }
-    throw new RedaxCustomerStoreUnavailableError()
+    throw unavailable('read', path, blobErrorCause(error))
   }
   if (result === null) {
     return null
   }
   if (result.statusCode !== 200) {
     // A 304 is impossible without `ifNoneMatch`; anything but a full body is not a reading.
-    throw new RedaxCustomerStoreUnavailableError()
+    throw unavailable('read', path, `status${result.statusCode}`)
   }
   const bytes = await readBounded(result.stream)
   return { etag: result.blob.etag, bytes, contentType: result.blob.contentType }
 }
 
+export interface RedaxCustomerBlobStoreOptions {
+  /** Server log hook for value-free provider anomalies (fixed words only). */
+  readonly diagnose?: (event: string) => void
+}
+
 export function createRedaxCustomerBlobPrivateStore(
   sdk: RedaxCustomerBlobSdk,
   credentials: RedaxCustomerBlobStoreCredentials,
+  options: RedaxCustomerBlobStoreOptions = {},
 ): RedaxCustomerPrivateStore {
+  const diagnose = options.diagnose ?? (() => undefined)
+  /** The read-back after a write the SDK reported as failed; its own failure keeps the write's cause. */
+  async function readBack(primitive: string, path: string, cause: string): Promise<RedaxCustomerStoredObject | null> {
+    try {
+      return await readLatest(sdk, 'private', credentials, path)
+    } catch {
+      throw unavailable(primitive, path, `${cause}.readback-failed`)
+    }
+  }
   return {
     read: (path) => readLatest(sdk, 'private', credentials, path),
     async create(path, bytes, contentType) {
@@ -176,11 +219,12 @@ export function createRedaxCustomerBlobPrivateStore(
           contentType,
         })
         return { ok: true, etag: written.etag }
-      } catch {
+      } catch (error) {
         // Either the path already existed or the SDK cannot say. Read back to decide.
-        const current = await readLatest(sdk, 'private', credentials, path)
+        const cause = blobErrorCause(error)
+        const current = await readBack('create', path, cause)
         if (current === null) {
-          throw new RedaxCustomerStoreUnavailableError()
+          throw unavailable('create', path, cause)
         }
         return bytesEqual(current.bytes, bytes) ? { ok: true, etag: current.etag } : { ok: false, code: 'EXISTS' }
       }
@@ -198,14 +242,21 @@ export function createRedaxCustomerBlobPrivateStore(
         })
         return { ok: true, etag: written.etag }
       } catch (error) {
-        const current = await readLatest(sdk, 'private', credentials, path)
+        const cause = blobErrorCause(error)
+        const current = await readBack('replace', path, cause)
         if (current !== null && bytesEqual(current.bytes, bytes)) {
           return { ok: true, etag: current.etag }
         }
         if (isPreconditionFailure(error) || current === null || current.etag !== ifMatch) {
+          if (isPreconditionFailure(error) && current !== null && current.etag === ifMatch) {
+            // The provider refused an ETag that a latest read still reports for the same bytes:
+            // nobody else wrote. It is still refused (never a blind overwrite), but the log says
+            // so — the page re-reads and tells this apart from a real edit elsewhere.
+            diagnose(`blob.replace.${redaxCustomerStoreRecordKind(path)}.precondition-etag-unchanged${current.etag.startsWith('W/') ? '.weak-etag' : ''}`)
+          }
           return { ok: false, code: 'PRECONDITION_FAILED' }
         }
-        throw new RedaxCustomerStoreUnavailableError()
+        throw unavailable('replace', path, cause)
       }
     },
     async remove(path, ifMatch) {
@@ -216,7 +267,7 @@ export function createRedaxCustomerBlobPrivateStore(
         if (isNotFound(error)) {
           return
         }
-        throw new RedaxCustomerStoreUnavailableError()
+        throw unavailable('remove', path, blobErrorCause(error))
       }
     },
   }
@@ -240,14 +291,14 @@ export function createRedaxCustomerBlobPublicStore(
       let response: Response
       try {
         response = await fetchImpl(publicUrl(path), { method: 'GET', redirect: 'error' })
-      } catch {
-        throw new RedaxCustomerStoreUnavailableError()
+      } catch (error) {
+        throw unavailable('served', path, blobErrorCause(error))
       }
       if (response.status === 404) {
         return null
       }
       if (!response.ok || response.body === null) {
-        throw new RedaxCustomerStoreUnavailableError()
+        throw unavailable('served', path, `http${response.status}`)
       }
       const bytes = await readBounded(response.body)
       return { etag: response.headers.get('etag') ?? '', bytes, contentType: response.headers.get('content-type') ?? '' }
@@ -264,10 +315,10 @@ export function createRedaxCustomerBlobPublicStore(
           cacheControlMaxAge: PUBLIC_CACHE_MAX_AGE_SECONDS,
         })
         return { ok: true, url: written.url }
-      } catch {
+      } catch (error) {
         const current = await readLatest(sdk, 'public', credentials, path)
         if (current === null) {
-          throw new RedaxCustomerStoreUnavailableError()
+          throw unavailable('create', path, blobErrorCause(error))
         }
         return bytesEqual(current.bytes, bytes) ? { ok: true, url: publicUrl(path) } : { ok: false, code: 'EXISTS' }
       }

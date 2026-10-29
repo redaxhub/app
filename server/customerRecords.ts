@@ -420,6 +420,36 @@ export function parseRedaxCustomerSetup(value: unknown, wallet: string, setupId:
   return { ...(value as unknown as RedaxCustomerSetupRecordV1), draft }
 }
 
+/**
+ * A DELETED draft. The setup record is not removed: a compare-and-set replaces it with this
+ * marker at the same path. Every request that read the draft before the deletion then fails its
+ * own compare-and-set (the ETag moved on), and every later read sees "deleted" — so neither an
+ * old tab nor a delayed request can recreate it, whatever the provider does with a conditional
+ * write to a missing object. It carries no draft content.
+ */
+export interface RedaxCustomerSetupTombstoneV1 {
+  readonly schema: 'redax.customer.setup-deleted.v1'
+  readonly id: string
+  readonly owner: string
+  /** The deleted record's revision + 1. */
+  readonly revision: number
+  readonly deletedAt: number
+}
+
+export function parseRedaxCustomerSetupTombstone(value: unknown, wallet: string, setupId: string): RedaxCustomerSetupTombstoneV1 | null {
+  if (
+    !isRecord(value) ||
+    value.schema !== 'redax.customer.setup-deleted.v1' ||
+    value.id !== setupId ||
+    value.owner !== wallet ||
+    !isRevision(value.revision) ||
+    !isTime(value.deletedAt)
+  ) {
+    return null
+  }
+  return value as unknown as RedaxCustomerSetupTombstoneV1
+}
+
 export function isRedaxCustomerTeamWriteOperation(value: unknown): value is RedaxCustomerTeamWriteOperation {
   return typeof value === 'string' && (REDAX_CUSTOMER_TEAM_WRITE_OPERATIONS as readonly string[]).includes(value)
 }

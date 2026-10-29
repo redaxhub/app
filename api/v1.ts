@@ -39,10 +39,11 @@ if (!config.configured) {
 }
 
 const sdk = { put, get, del } as unknown as RedaxCustomerBlobSdk
+const log = (event: string): void => console.info(`redax.customer ${event}`)
 
 const handleRedaxCustomerRequest = createRedaxCustomerApi({
   config,
-  privateStore: createRedaxCustomerBlobPrivateStore(sdk, { storeId: config.privateStoreId, token: config.privateStoreToken }),
+  privateStore: createRedaxCustomerBlobPrivateStore(sdk, { storeId: config.privateStoreId, token: config.privateStoreToken }, { diagnose: log }),
   publicStore: createRedaxCustomerBlobPublicStore(
     sdk,
     { storeId: config.publicStoreId, token: config.publicStoreToken },
@@ -51,7 +52,7 @@ const handleRedaxCustomerRequest = createRedaxCustomerApi({
   ),
   readCampaign: createRedaxCustomerChainReader({ rpcUrl: config.rpcUrl, programId: config.programId, fetchImpl: fetch }),
   normalizeLogo: normalizeRedaxCustomerLogo,
-  log: (event) => console.info(`redax.customer ${event}`),
+  log,
 })
 
 export default {

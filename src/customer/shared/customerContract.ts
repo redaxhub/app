@@ -306,6 +306,10 @@ export interface RedaxCustomerSetupRecordV1 {
   readonly draft: RedaxCustomerDraftV1
   readonly plan: RedaxCustomerPlanV1 | null
   readonly planHash: string | null
+  /**
+   * When this setup's plan files were last published; `null` = never. A plan reopened for
+   * editing keeps it — the files it published stay public — so such a draft is never deleted.
+   */
   readonly publishedAt: number | null
   readonly attempts: readonly RedaxCustomerCreateAttemptV1[]
   readonly campaign: {
@@ -328,6 +332,12 @@ export interface RedaxCustomerSetupSummary {
   readonly outputMint: string | null
   readonly createdAt: number
   readonly updatedAt: number
+  /**
+   * Whether the list offers "Delete draft": a draft whose setup never started (no plan files
+   * published, no Create attempt, no campaign). A display hint only — `setup.delete` re-checks
+   * everything from the stored record itself.
+   */
+  readonly deletable: boolean
 }
 
 // --- Coordination ------------------------------------------------------------------------

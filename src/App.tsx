@@ -1046,6 +1046,9 @@ export async function readRedaxFreshCampaignLifecycleTruth(
 
 export function App() {
   const [activeScreenId, setActiveScreenId] = useState<ScreenId>('home')
+  // The mounted Team workspace's own leave check (filled by it, emptied when it goes): the menu
+  // leaves the workspace only through it, so an unsaved draft is never dropped without a choice.
+  const workspaceLeave = useRef<((proceed: () => void) => void) | null>(null)
   // The campaign selection — memory only, never persisted, and DISCRIMINATED.
   //
   // It starts as a LISTED default because that is what a first paint of a curated
@@ -1520,6 +1523,7 @@ export function App() {
     <CustomerWorkspace
       appBaseUrl={readRedaxAppBaseUrl()}
       explorerCluster={explorerCluster}
+      leaveGuard={workspaceLeave}
       onOpenHolderView={handleOpenHolderView}
       programId={teamAdminRuntimeProgramId}
       readCampaignTruth={readFreshCampaignSetupTruth}
@@ -1540,11 +1544,24 @@ export function App() {
       </div>
     </SurfaceCard>
   ) : undefined
+  // The menu. The active item does nothing; leaving the Team workspace goes through its check
+  // first, and only the newest destination is ever taken.
+  function navigateTo(id: string): void {
+    if (id === activeScreenId) {
+      return
+    }
+    const guard = activeScreenId === 'team-workspace' ? workspaceLeave.current : null
+    if (guard === null) {
+      setActiveScreenId(id as ScreenId)
+    } else {
+      guard(() => setActiveScreenId(id as ScreenId))
+    }
+  }
   const shell = (
     <AppShell
       navItems={isDevnetTxEnabled ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== 'team-workspace')}
       activeId={activeScreenId}
-      onNavigate={(id) => setActiveScreenId(id as ScreenId)}
+      onNavigate={navigateTo}
       mockModeLabel={environment?.mode}
       mockModeNote={
         environment

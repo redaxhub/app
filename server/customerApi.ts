@@ -85,11 +85,13 @@ import {
   parseRedaxCustomerGrantsIndex,
   parseRedaxCustomerSession,
   parseRedaxCustomerSetup,
+  parseRedaxCustomerSetupTombstone,
   parseRedaxCustomerWorkspaceIndex,
   sanitizeRedaxCustomerDraftInput,
   type RedaxCustomerClaimAttemptRecordV1,
   type RedaxCustomerGrantsIndexV1,
   type RedaxCustomerSessionRecordV2,
+  type RedaxCustomerSetupTombstoneV1,
   type RedaxCustomerWorkspaceIndexV1,
 } from './customerRecords.js'
 import { createRedaxCustomerSignInInput, verifyRedaxCustomerSignIn } from './customerSiws.js'
@@ -158,6 +160,11 @@ function summaryOf(setup: RedaxCustomerSetupRecordV1): RedaxCustomerSetupSummary
     outputMint: setup.campaign?.outputMint ?? null,
     createdAt: setup.createdAt,
     updatedAt: setup.updatedAt,
+    deletable:
+      (setup.state === 'DRAFT' || setup.state === 'REVIEW_READY') &&
+      setup.publishedAt === null &&
+      setup.attempts.length === 0 &&
+      setup.campaign === null,
   }
 }
 
@@ -241,15 +248,21 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
     return result.ok
   }
 
-  /** Read-modify-write a DERIVED object (an index) with a short bounded retry on conflict. */
+  /**
+   * Read-modify-write a DERIVED object (an index) with a short bounded retry on conflict. A
+   * `mutate` that returns `null` means "already as wanted": nothing is written.
+   */
   async function updateDerived<T>(
     path: string,
     parse: (value: unknown) => T | null,
-    mutate: (current: T | null) => T,
-  ): Promise<T> {
+    mutate: (current: T | null) => T | null,
+  ): Promise<T | null> {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const current = await readJson(path, parse)
       const next = mutate(current?.value ?? null)
+      if (next === null) {
+        return current?.value ?? null
+      }
       const written = current === null ? await writeNew(path, next) : await writeOver(path, next, current.etag)
       if (written) {
         return next
@@ -382,12 +395,95 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
     return value
   }
 
+  /** The record at a setup path: a live setup, the marker of a deleted one, or nothing. */
+  async function readSetupEntry(
+    wallet: string,
+    setupId: string,
+  ): Promise<
+    | { readonly kind: 'live'; readonly value: RedaxCustomerSetupRecordV1; readonly etag: string }
+    | { readonly kind: 'deleted'; readonly value: RedaxCustomerSetupTombstoneV1; readonly etag: string }
+    | null
+  > {
+    const object = await privateStore.read(PATHS.setup(wallet, setupId))
+    if (object === null) {
+      return null
+    }
+    const json = parseRedaxCustomerStoredJson(object)
+    const tombstone = parseRedaxCustomerSetupTombstone(json, wallet, setupId)
+    if (tombstone !== null) {
+      return { kind: 'deleted', value: tombstone, etag: object.etag }
+    }
+    const value = parseRedaxCustomerSetup(json, wallet, setupId)
+    if (value === null) {
+      // A record that does not parse is not an authority for anything. Fail closed.
+      fail(500, 'INTERNAL')
+    }
+    return { kind: 'live', value, etag: object.etag }
+  }
+
+  /**
+   * The index entries whose record is a confirmed deletion marker: a delete whose last step (the
+   * index) failed leaves one. Read only when the index is full, at most one read per entry. An
+   * entry that cannot be read now is kept — only a marker actually read frees a slot.
+   */
+  async function deletedIndexEntries(wallet: string, entries: readonly { readonly id: string }[]): Promise<ReadonlySet<string>> {
+    const deleted = new Set<string>()
+    let unreadable: RedaxCustomerStoreUnavailableError | null = null
+    for (const entry of entries) {
+      try {
+        if ((await readSetupEntry(wallet, entry.id))?.kind === 'deleted') {
+          deleted.add(entry.id)
+        }
+      } catch (error) {
+        if (error instanceof RedaxCustomerStoreUnavailableError) {
+          unreadable ??= error
+        } else if (!(error instanceof RedaxCustomerHttpError)) {
+          throw error
+        }
+      }
+    }
+    if (deleted.size === 0 && unreadable !== null) {
+      // Nothing could be freed and the check was incomplete: say "unavailable", not "full".
+      throw unreadable
+    }
+    return deleted
+  }
+
+  /** A live setup. A deleted one is gone for every operation, exactly like one never created. */
   async function readSetup(wallet: string, setupId: string): Promise<{ readonly value: RedaxCustomerSetupRecordV1; readonly etag: string }> {
-    const stored = await readJson(PATHS.setup(wallet, setupId), (value) => parseRedaxCustomerSetup(value, wallet, setupId))
-    if (stored === null) {
+    const entry = await readSetupEntry(wallet, setupId)
+    if (entry === null || entry.kind === 'deleted') {
       fail(404, 'NOT_FOUND')
     }
-    return stored
+    return { value: entry.value, etag: entry.etag }
+  }
+
+  /**
+   * DELETE DRAFT, NARROWLY. Only a draft whose setup never started may go: DRAFT or REVIEW_READY,
+   * no plan files ever published, no Create attempt, no campaign, and no Team chain write held
+   * for it. Anything that cannot be confirmed is kept.
+   */
+  async function refuseUnlessDeletableDraft(wallet: string, setup: RedaxCustomerSetupRecordV1): Promise<void> {
+    if (
+      (setup.state !== 'DRAFT' && setup.state !== 'REVIEW_READY') ||
+      setup.publishedAt !== null ||
+      setup.attempts.length > 0 ||
+      setup.campaign !== null
+    ) {
+      fail(409, 'INVALID_STATE')
+    }
+    // A held claim always names a published setup, so none should name this one; if one does,
+    // it is the recovery record of a chain step and the draft is kept.
+    const claim = await readClaim(wallet)
+    if (claim !== null && claim.value.state === 'HELD' && claim.value.setupId === setup.id) {
+      fail(409, 'INVALID_STATE')
+    }
+    // A plan reopened for editing before `publishedAt` was kept across a reopen carries no
+    // marker — but its final logo was published as the plan's image. If this draft's final logo
+    // is public, the draft is kept (even when another draft published the same image).
+    if (setup.draft.logo !== null && (await publicStore.read(redaxCustomerPublicPath(setup.draft.logo.sha256, 'png'))) !== null) {
+      fail(409, 'INVALID_STATE')
+    }
   }
 
   function expectRevision(setup: RedaxCustomerSetupRecordV1, value: unknown): void {
@@ -731,8 +827,9 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         const items: RedaxCustomerSetupSummary[] = []
         let missing = 0
         for (const entry of slice) {
-          const stored = await readJson(PATHS.setup(session.wallet, entry.id), (value) => parseRedaxCustomerSetup(value, session.wallet, entry.id))
-          if (stored === null) {
+          const stored = await readSetupEntry(session.wallet, entry.id)
+          if (stored === null || stored.kind === 'deleted') {
+            // A deleted draft whose index entry is not cleaned up yet is not listed.
             missing += 1
             continue
           }
@@ -767,7 +864,10 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         const indexPath = PATHS.workspaceIndex(session.wallet)
         const parseIndex = (value: unknown): RedaxCustomerWorkspaceIndexV1 | null => parseRedaxCustomerWorkspaceIndex(value, session.wallet)
         const existing = await readJson(indexPath, parseIndex)
-        if ((existing?.value.setups.length ?? 0) >= REDAX_CUSTOMER_MAX_SETUPS_PER_WALLET) {
+        const listed = existing?.value.setups ?? []
+        // A deleted draft holds no capacity, also when its index entry is still there.
+        const reclaimed = listed.length >= REDAX_CUSTOMER_MAX_SETUPS_PER_WALLET ? await deletedIndexEntries(session.wallet, listed) : new Set<string>()
+        if (listed.length - reclaimed.size >= REDAX_CUSTOMER_MAX_SETUPS_PER_WALLET) {
           fail(409, 'LIMIT_REACHED')
         }
         const id = `sp_${hex(12)}`
@@ -806,13 +906,26 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         if (!(await writeNew(PATHS.setup(session.wallet, id), setup))) {
           fail(503, 'STORE_UNAVAILABLE')
         }
-        await updateDerived(indexPath, parseIndex, (current): RedaxCustomerWorkspaceIndexV1 => ({
-          schema: 'redax.customer.workspace.v1',
-          wallet: session.wallet,
-          revision: (current?.revision ?? 0) + 1,
-          setups: [{ id, createdAt: context.now }, ...(current?.setups ?? []).filter((entry) => entry.id !== id)],
-          updatedAt: context.now,
-        }))
+        // The limit is checked again on the very index that is written, so two creates never pass
+        // it together. A marker is never live again, so its entry may go from any later index.
+        let admitted = false
+        await updateDerived(indexPath, parseIndex, (current): RedaxCustomerWorkspaceIndexV1 | null => {
+          const kept = (current?.setups ?? []).filter((entry) => entry.id !== id && !reclaimed.has(entry.id))
+          admitted = kept.length < REDAX_CUSTOMER_MAX_SETUPS_PER_WALLET
+          return admitted
+            ? {
+                schema: 'redax.customer.workspace.v1',
+                wallet: session.wallet,
+                revision: (current?.revision ?? 0) + 1,
+                setups: [{ id, createdAt: context.now }, ...kept],
+                updatedAt: context.now,
+              }
+            : null
+        })
+        if (!admitted) {
+          // The record written above stays unlisted, exactly as after a crash between the two.
+          fail(409, 'LIMIT_REACHED')
+        }
         return redaxCustomerJson(200, { ok: true, setup })
       },
     },
@@ -838,7 +951,8 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         if (draft === null) {
           fail(400, 'BAD_REQUEST')
         }
-        const setup = await replaceSetup(session.wallet, current, { draft, state: 'DRAFT', plan: null, planHash: null, publishedAt: null }, context.now)
+        // `publishedAt` is kept: a reopened plan's files stay public, and that stays on record.
+        const setup = await replaceSetup(session.wallet, current, { draft, state: 'DRAFT', plan: null, planHash: null }, context.now)
         return redaxCustomerJson(200, { ok: true, setup })
       },
     },
@@ -848,21 +962,62 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
       handler: async (context) => {
         const session = await requireSession(context, { echo: true })
         const body = await readRedaxCustomerJsonBody(context.request)
-        const current = await readSetup(session.wallet, setupIdFrom(body.id))
-        expectRevision(current.value, body.expectedRevision)
-        if (current.value.state !== 'DRAFT' && current.value.state !== 'REVIEW_READY') {
-          // Anything published or started is kept: its public files and chain state exist.
-          fail(409, 'INVALID_STATE')
+        // Any customer who still has access may delete a draft of their own — also while new
+        // campaigns are paused for them. A wallet without access deletes nothing.
+        await requirePermission(session.wallet, 'manageExisting')
+        const setupId = setupIdFrom(body.id)
+        const setupPath = PATHS.setup(session.wallet, setupId)
+        let entry = await readSetupEntry(session.wallet, setupId)
+        if (entry === null) {
+          fail(404, 'NOT_FOUND')
         }
-        await privateStore.remove(PATHS.setup(session.wallet, current.value.id), current.etag)
-        const indexPath = PATHS.workspaceIndex(session.wallet)
-        await updateDerived(indexPath, (value) => parseRedaxCustomerWorkspaceIndex(value, session.wallet), (index): RedaxCustomerWorkspaceIndexV1 => ({
-          schema: 'redax.customer.workspace.v1',
-          wallet: session.wallet,
-          revision: (index?.revision ?? 0) + 1,
-          setups: (index?.setups ?? []).filter((entry) => entry.id !== current.value.id),
-          updatedAt: context.now,
-        }))
+        if (entry.kind === 'live') {
+          const current = entry
+          expectRevision(current.value, body.expectedRevision)
+          await refuseUnlessDeletableDraft(session.wallet, current.value)
+          const tombstone: RedaxCustomerSetupTombstoneV1 = {
+            schema: 'redax.customer.setup-deleted.v1',
+            id: setupId,
+            owner: session.wallet,
+            revision: current.value.revision + 1,
+            deletedAt: context.now,
+          }
+          // Compare-and-set on the exact record that was checked: a save, prepare or publish
+          // that landed in between moves the ETag, and then nothing is deleted.
+          if (!(await writeOver(setupPath, tombstone, current.etag))) {
+            entry = await readSetupEntry(session.wallet, setupId)
+            if (entry === null || entry.kind !== 'deleted') {
+              fail(409, 'STALE_REVISION')
+            }
+          }
+        }
+        // Deleted — now, or by an earlier delivery of this same request whose answer was lost.
+        // The listing follows. If that last step fails the deletion still stands and is answered
+        // as done: the list already skips the entry, and a create that needs its slot frees it.
+        try {
+          await updateDerived(
+            PATHS.workspaceIndex(session.wallet),
+            (value) => parseRedaxCustomerWorkspaceIndex(value, session.wallet),
+            (index): RedaxCustomerWorkspaceIndexV1 | null =>
+              index === null || !index.setups.some((item) => item.id === setupId)
+                ? null
+                : {
+                    schema: 'redax.customer.workspace.v1',
+                    wallet: session.wallet,
+                    revision: index.revision + 1,
+                    setups: index.setups.filter((item) => item.id !== setupId),
+                    updatedAt: context.now,
+                  },
+          )
+        } catch (error) {
+          if (error instanceof RedaxCustomerStoreUnavailableError) {
+            log(`setup.delete.index-deferred${error.detail === null ? '' : ` ${error.detail}`}`)
+          } else if (error instanceof RedaxCustomerHttpError && error.code === 'STORE_UNAVAILABLE') {
+            log('setup.delete.index-deferred')
+          } else {
+            throw error
+          }
+        }
         return redaxCustomerJson(200, { ok: true })
       },
     },
@@ -907,7 +1062,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         const setup = await replaceSetup(
           session.wallet,
           current,
-          { draft: { ...current.value.draft, logo }, state: 'DRAFT', plan: null, planHash: null, publishedAt: null },
+          { draft: { ...current.value.draft, logo }, state: 'DRAFT', plan: null, planHash: null },
           context.now,
         )
         return redaxCustomerJson(200, { ok: true, setup })
@@ -945,7 +1100,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         const setup = await replaceSetup(
           session.wallet,
           current,
-          { draft: { ...current.value.draft, logo: { ...logo, accepted: true } }, state: 'DRAFT', plan: null, planHash: null, publishedAt: null },
+          { draft: { ...current.value.draft, logo: { ...logo, accepted: true } }, state: 'DRAFT', plan: null, planHash: null },
           context.now,
         )
         return redaxCustomerJson(200, { ok: true, setup })
@@ -1012,7 +1167,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
           preparedAt: context.now,
         })
         const planHash = await computeRedaxCustomerPlanHash(plan)
-        const setup = await replaceSetup(session.wallet, current, { state: 'REVIEW_READY', plan, planHash, publishedAt: null }, context.now)
+        const setup = await replaceSetup(session.wallet, current, { state: 'REVIEW_READY', plan, planHash }, context.now)
         return redaxCustomerJson(200, { ok: true, setup })
       },
     },
@@ -1472,7 +1627,8 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         return redaxCustomerError(error.status, error.code)
       }
       if (error instanceof RedaxCustomerStoreUnavailableError) {
-        log(`store.unavailable.${op}`)
+        // Which primitive, record kind and provider error class — fixed words, never a value.
+        log(`store.unavailable.${op}${error.detail === null ? '' : ` ${error.detail}`}`)
         return redaxCustomerError(503, 'STORE_UNAVAILABLE')
       }
       log(`internal.${op}`)

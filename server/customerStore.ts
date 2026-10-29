@@ -56,10 +56,40 @@ export interface RedaxCustomerPublicStore {
 }
 
 export class RedaxCustomerStoreUnavailableError extends Error {
-  constructor(message = 'storage unavailable') {
+  /**
+   * A fixed, value-free diagnostic tag for the server log — which primitive, which kind of
+   * record and which provider error class, e.g. `replace.setup.BlobServiceRateLimited`. Never a
+   * path, a provider message, a header or a token.
+   */
+  readonly detail: string | null
+  constructor(message = 'storage unavailable', detail: string | null = null) {
     super(message)
     this.name = 'RedaxCustomerStoreUnavailableError'
+    this.detail = detail
   }
+}
+
+/** The kind of record a store path names: one fixed word for diagnostics, never the path. */
+export function redaxCustomerStoreRecordKind(path: string): string {
+  if (path.startsWith('v1/auth/session/')) {
+    return 'session'
+  }
+  if (path.startsWith('v1/auth/nonce/')) {
+    return 'nonce'
+  }
+  if (path === 'v1/grants-index.json') {
+    return 'grants-index'
+  }
+  if (path.startsWith('v1/grants/')) {
+    return 'grant'
+  }
+  if (path.startsWith('v1/claims/')) {
+    return path.includes('/attempts/') ? 'attempt' : 'claim'
+  }
+  if (path.startsWith('v1/ws/')) {
+    return path.endsWith('/index.json') ? 'index' : path.includes('/logos/') ? 'logo' : path.includes('/setups/') ? 'setup' : 'workspace'
+  }
+  return path.startsWith('m/') ? 'public' : 'other'
 }
 
 /** Only these characters may appear in a store path: no traversal, no query, no host. */

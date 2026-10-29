@@ -10,6 +10,17 @@
 // one save in flight at a time, each carrying the revision it was based on. The status says
 // Saving, Saved or Save failed; a draft changed in another tab is never overwritten (the
 // server refuses the stale revision and the page says so).
+//
+// A REFUSED REVISION IS CHECKED, NOT ASSUMED. Before the page says "changed elsewhere" it reads
+// the draft once: if nothing changed there, the save simply failed and Retry stays offered; if
+// the change is exactly this page's own earlier save whose answer was lost, that revision is
+// taken and the newer edits are saved on top of it. Only a different change elsewhere is
+// reported as one. Unsaved fields always stay on the page.
+//
+// LEAVING NEVER DROPS THEM SILENTLY. Back (and My campaigns, the app menu, and the reload offered
+// after a change elsewhere) saves the newest edits first and leaves only once that save went
+// through. Otherwise the page stays, says why, and leaves only if the customer confirms that the
+// unsaved changes on it are discarded; Cancel keeps everything. Nothing is kept anywhere else.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isCanonicalRedaxPublicKey } from '../config/redaxEnv'
@@ -24,6 +35,7 @@ import { useRedaxTeamAdminMutationActions } from '../teamAdmin/RedaxTeamAdminMut
 import { redaxCustomerClearInput, redaxCustomerInputFirstFile, redaxCustomerInputValue } from './customerDomEvents'
 import { useRedaxCustomerSession } from './CustomerSessionProvider'
 import { useCustomerLogoPreview } from './useCustomerLogoPreview'
+import { redaxCanonicalJson } from './shared/customerCanonical.js'
 import {
   REDAX_CUSTOMER_LOGO_MAX_INPUT_BYTES,
   REDAX_CUSTOMER_MAX_INPUT_ROWS,
@@ -39,7 +51,13 @@ import {
 } from './shared/customerPlan.js'
 
 type EditableDraft = Omit<RedaxCustomerDraftV1, 'logo'>
-type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'failed' | 'stale'
+type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'failed' | 'stale' | 'gone'
+/** What a re-read says about a refused revision. */
+type StaleCheck = 'adopted' | 'unchanged' | 'changed' | 'unknown'
+/** A leave in progress, and next to which control its question is shown. */
+type LeaveState = { readonly phase: 'saving' | 'confirm'; readonly at: 'status' | 'footer' } | null
+/** Asks the open composer to leave: `proceed` runs once nothing unsaved would be lost silently. */
+export type RedaxCustomerComposerLeaveGuard = (proceed: () => void) => void
 type MintRead =
   | { readonly mint: string; readonly state: 'reading' }
   | { readonly mint: string; readonly state: 'ok'; readonly decimals: number }
@@ -47,10 +65,21 @@ type MintRead =
 
 const SAVE_DELAY_MS = 1500
 
+/** Shown when a save did not land but nothing changed elsewhere: the edits are still here. */
+const SAVE_NOT_LANDED = 'Your latest changes could not be saved just now. They are still on this page — use Retry.'
+
 function editableOf(draft: RedaxCustomerDraftV1): EditableDraft {
   const { logo: _logo, ...rest } = draft
   void _logo
   return rest
+}
+
+function sameEditable(left: EditableDraft, right: EditableDraft): boolean {
+  try {
+    return redaxCanonicalJson(left) === redaxCanonicalJson(right)
+  } catch {
+    return false
+  }
 }
 
 function nextRowId(rows: readonly RedaxCustomerDraftRowV1[]): string {
@@ -81,11 +110,14 @@ export function CustomerComposer({
   canEdit,
   onBack,
   onReview,
+  leaveGuard,
 }: {
   readonly setupId: string
   readonly canEdit: boolean
   readonly onBack: () => void
   readonly onReview: (setupId: string) => void
+  /** Filled while mounted, so the workspace's own navigation leaves through the same check. */
+  readonly leaveGuard?: { current: RedaxCustomerComposerLeaveGuard | null }
 }) {
   const session = useRedaxCustomerSession()
   const api = session.api
@@ -100,6 +132,7 @@ export function CustomerComposer({
   const [busy, setBusy] = useState<'upload' | 'accept' | 'review' | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [endError, setEndError] = useState<string | null>(null)
+  const [leave, setLeave] = useState<LeaveState>(null)
 
   const mountedRef = useRef(true)
   const draftRef = useRef<EditableDraft | null>(null)
@@ -110,11 +143,27 @@ export function CustomerComposer({
   const lastSaveOkRef = useRef(true)
   const mintGenerationRef = useRef<Record<string, number>>({})
   const setupStateRef = useRef<RedaxCustomerSetupRecordV1['state'] | null>(null)
+  // Saves whose outcome is unknown (no answer, or a server-side failure), with the revision they
+  // were based on: one of them may have landed even though the page never heard back.
+  const uncertainRef = useRef<{ readonly revision: number; readonly snapshots: EditableDraft[] } | null>(null)
+  const saveNoticeRef = useRef<string | null>(null)
+  const goneRef = useRef(false)
+  // Where a leave goes: always the NEWEST request (Back, a header or menu destination), and run at
+  // most once. `leaveRef` mirrors `leave` for decisions made between renders.
+  const leaveTargetRef = useRef<(() => void) | null>(null)
+  const leaveRef = useRef<LeaveState>(null)
+  const questionRef = useRef<HTMLDivElement | null>(null)
+  const questionCancelRef = useRef<HTMLButtonElement | null>(null)
+  // The control that asked to leave (a menu item, Back, a header button): Cancel gives focus back.
+  const openerRef = useRef<HTMLElement | null>(null)
+  const [asked, setAsked] = useState(0)
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      // A page that is gone (closed for a sign-out, a wallet switch, another draft) navigates nowhere.
+      leaveTargetRef.current = null
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current)
       }
@@ -142,7 +191,7 @@ export function CustomerComposer({
         return
       }
       if (!result.ok) {
-        setLoadError(result.message)
+        setLoadError(result.code === 'NOT_FOUND' ? 'This draft no longer exists. It may have been deleted.' : result.message)
         return
       }
       if (accept(result.setup)) {
@@ -163,45 +212,228 @@ export function CustomerComposer({
   // same final image on every save would be wasted reads.
   const logoUrl = useCustomerLogoPreview(api, logo?.sha256 ?? null)
 
+  /**
+   * The server refused `expectedRevision`. Read the draft once and say why — never by guessing,
+   * and never by writing over anything.
+   */
+  const checkStaleRefusal = useCallback(
+    async (expectedRevision: number): Promise<{ readonly check: StaleCheck; readonly setup: RedaxCustomerSetupRecordV1 | null }> => {
+      const latest = await api.getSetup(setupId)
+      if (!latest.ok || latest.setup.id !== setupId || latest.setup.owner !== wallet) {
+        return { check: 'unknown', setup: null }
+      }
+      if (latest.setup.revision === expectedRevision) {
+        // Nothing changed there: the save did not land, and nobody else's edit is in the way.
+        return { check: 'unchanged', setup: null }
+      }
+      const uncertain = uncertainRef.current
+      const editable = editableOf(latest.setup.draft)
+      if (
+        uncertain !== null &&
+        uncertain.revision === expectedRevision &&
+        latest.setup.revision === expectedRevision + 1 &&
+        latest.setup.state === 'DRAFT' &&
+        uncertain.snapshots.some((snapshot) => sameEditable(snapshot, editable))
+      ) {
+        // Exactly one of this page's own unanswered saves, and nothing after it: take it.
+        return accept(latest.setup) ? { check: 'adopted', setup: latest.setup } : { check: 'unknown', setup: null }
+      }
+      return { check: 'changed', setup: null }
+    },
+    [accept, api, setupId, wallet],
+  )
+
   const flush = useCallback(async (): Promise<boolean> => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current)
       timerRef.current = null
     }
     const run = queueRef.current.then(async () => {
-      if (!dirtyRef.current || draftRef.current === null) {
+      if (!dirtyRef.current || draftRef.current === null || goneRef.current) {
         return
       }
       dirtyRef.current = false
       const snapshot = draftRef.current
       setSaveState('saving')
       // A published-but-never-created plan may be reopened for editing; its public files stay.
-      const reopen = setupStateRef.current === 'PUBLISHED'
-      const result = await api.saveSetup({ id: setupId, expectedRevision: revisionRef.current, draft: snapshot, reopen })
+      let reopen = setupStateRef.current === 'PUBLISHED'
+      // The revision the request IN FLIGHT was sent with. Each request below carries its own, and
+      // an unanswered one is remembered with exactly that revision — never an earlier request's.
+      let sentRevision = revisionRef.current
+      let result = await api.saveSetup({ id: setupId, expectedRevision: sentRevision, draft: snapshot, reopen })
       if (!mountedRef.current) {
         return
       }
+      let check: StaleCheck | null = null
+      // Bounded: a further round needs a further own unanswered save to be recognized.
+      for (let round = 0; round < 3 && !result.ok && result.code === 'STALE_REVISION'; round += 1) {
+        const settled = await checkStaleRefusal(sentRevision)
+        if (!mountedRef.current) {
+          return
+        }
+        check = settled.check
+        if (settled.setup === null) {
+          break
+        }
+        // Adopted: that save landed. Only the snapshot itself is left to write, if it differs.
+        if (sameEditable(snapshot, editableOf(settled.setup.draft))) {
+          // It already holds exactly this snapshot: nothing left to write.
+          result = { ok: true, setup: settled.setup }
+          break
+        }
+        reopen = false
+        sentRevision = revisionRef.current
+        result = await api.saveSetup({ id: setupId, expectedRevision: sentRevision, draft: snapshot, reopen })
+        if (!mountedRef.current) {
+          return
+        }
+        check = null
+      }
       if (result.ok) {
         accept(result.setup)
+        uncertainRef.current = null
         lastSaveOkRef.current = true
+        const shown = saveNoticeRef.current
+        if (shown !== null) {
+          // The failure this page reported is over; other notices stay.
+          saveNoticeRef.current = null
+          setNotice((current) => (current === shown ? null : current))
+        }
         setSaveState(dirtyRef.current ? 'dirty' : 'saved')
+        if (!dirtyRef.current && leaveRef.current?.phase === 'confirm') {
+          // Nothing is unsaved any more: the question is moot. Back now leaves at once.
+          leaveTargetRef.current = null
+          leaveRef.current = null
+          setLeave(null)
+        }
+        return
+      }
+      lastSaveOkRef.current = false
+      if (result.code === 'NOT_FOUND') {
+        // The draft was deleted (in another tab or browser). Nothing is saved from here again.
+        goneRef.current = true
+        setSaveState('gone')
+        setNotice('This draft was deleted, so these changes cannot be saved.')
         return
       }
       dirtyRef.current = true
-      lastSaveOkRef.current = false
-      setSaveState(result.code === 'STALE_REVISION' ? 'stale' : 'failed')
-      if (result.code !== 'STALE_REVISION') {
-        setNotice(result.message)
+      if (result.code === 'NETWORK' || result.code === 'STORE_UNAVAILABLE' || result.code === 'INTERNAL' || result.status >= 500) {
+        // No answer, or a server-side failure: this snapshot may or may not have landed.
+        const uncertain = uncertainRef.current
+        uncertainRef.current = {
+          revision: sentRevision,
+          snapshots: [...(uncertain !== null && uncertain.revision === sentRevision ? uncertain.snapshots : []), snapshot].slice(-8),
+        }
       }
+      if (result.code === 'STALE_REVISION' && check === 'changed') {
+        setSaveState('stale')
+        return
+      }
+      const message = result.code === 'STALE_REVISION' ? SAVE_NOT_LANDED : result.message
+      saveNoticeRef.current = message
+      setNotice(message)
+      setSaveState('failed')
     })
     queueRef.current = run.catch(() => undefined)
     await run
     return !dirtyRef.current && lastSaveOkRef.current
-  }, [accept, api, setupId])
+  }, [accept, api, checkStaleRefusal, setupId])
+
+  const showLeave = useCallback((next: LeaveState): void => {
+    leaveRef.current = next
+    setLeave(next)
+  }, [])
+
+  /** Save first; go to the newest destination only if that went through, otherwise ask. */
+  const runLeave = useCallback(
+    async (at: 'status' | 'footer'): Promise<void> => {
+      showLeave({ phase: 'saving', at })
+      let saved = await flush()
+      // Edits typed while that save was in flight are saved too (possibly by an autosave already
+      // queued, which the next flush waits for) — a bounded number of times, and never after a failure.
+      for (let round = 0; !saved && round < 2 && lastSaveOkRef.current && !goneRef.current && mountedRef.current; round += 1) {
+        saved = await flush()
+      }
+      if (!mountedRef.current) {
+        return
+      }
+      if (saved) {
+        const proceed = leaveTargetRef.current
+        leaveTargetRef.current = null
+        showLeave(null)
+        proceed?.()
+        return
+      }
+      showLeave({ phase: 'confirm', at })
+      setAsked((count) => count + 1)
+    },
+    [flush, showLeave],
+  )
+
+  /**
+   * One leave at a time, and the NEWEST request is its destination: a request while it saves
+   * only changes where it goes; a request while it asks only changes that and shows the
+   * question again — neither starts another save.
+   */
+  const requestLeave = useCallback(
+    (proceed: () => void, at: 'status' | 'footer'): void => {
+      leaveTargetRef.current = proceed
+      openerRef.current = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+      const current = leaveRef.current
+      if (current?.phase === 'saving') {
+        return
+      }
+      if (current?.phase === 'confirm') {
+        setAsked((count) => count + 1)
+        return
+      }
+      void runLeave(at)
+    },
+    [runLeave],
+  )
+
+  useEffect(() => {
+    if (leaveGuard === undefined) {
+      return
+    }
+    const guard: RedaxCustomerComposerLeaveGuard = (proceed) => requestLeave(proceed, 'status')
+    leaveGuard.current = guard
+    return () => {
+      if (leaveGuard.current === guard) {
+        leaveGuard.current = null
+      }
+    }
+  }, [leaveGuard, requestLeave])
+
+  // The question is brought into view and focused where it was asked from — on a phone the menu
+  // that was tapped is far above it.
+  useEffect(() => {
+    if (asked === 0) {
+      return
+    }
+    questionRef.current?.scrollIntoView?.({ block: 'center' })
+    questionCancelRef.current?.focus?.({ preventScroll: true })
+  }, [asked])
+
+  function cancelLeave(): void {
+    const opener = openerRef.current
+    openerRef.current = null
+    leaveTargetRef.current = null
+    showLeave(null)
+    // After the re-render, so a control disabled while asking is enabled again.
+    setTimeout(() => opener?.focus?.(), 0)
+  }
+
+  function leaveWithoutSaving(): void {
+    const proceed = leaveTargetRef.current
+    leaveTargetRef.current = null
+    showLeave(null)
+    proceed?.()
+  }
 
   const update = useCallback(
     (patch: Partial<EditableDraft>): void => {
-      if (!canEdit || draftRef.current === null) {
+      if (!canEdit || draftRef.current === null || goneRef.current) {
         return
       }
       const next = { ...draftRef.current, ...patch }
@@ -397,8 +629,49 @@ export function CustomerComposer({
           ? 'Save failed'
           : saveState === 'stale'
             ? 'Changed elsewhere'
-            : 'Saved'
+            : saveState === 'gone'
+              ? 'Deleted'
+              : 'Saved'
   const nowMs = Date.now()
+  const leaveQuestion = (at: 'status' | 'footer') =>
+    leave !== null && leave.phase === 'confirm' && leave.at === at ? (
+      <div className="customer-notice customer-notice--caution" ref={questionRef} role="alertdialog" aria-label="Leave without saving?">
+        <p>
+          <strong>Leave without saving?</strong>
+        </p>
+        <p>
+          {saveState === 'stale'
+            ? 'This draft was changed in another tab or browser, so the changes on this page were not saved.'
+            : saveState === 'gone'
+              ? 'This draft was deleted, so the changes on this page cannot be saved.'
+              : saveState === 'failed'
+                ? 'Your latest changes could not be saved.'
+                : 'Your latest changes are not saved yet.'}{' '}
+          If you leave now, the changes on this page that are not saved are discarded.
+        </p>
+        <div className="customer-actions">
+          <button className="customer-btn" onClick={cancelLeave} ref={questionCancelRef} type="button">
+            Cancel
+          </button>
+          {saveState !== 'stale' && saveState !== 'gone' ? (
+            <button
+              className="customer-btn"
+              onClick={() => {
+                if (leaveTargetRef.current !== null) {
+                  void runLeave(at)
+                }
+              }}
+              type="button"
+            >
+              {saveState === 'failed' ? 'Retry and leave' : 'Save and leave'}
+            </button>
+          ) : null}
+          <button className="customer-btn" onClick={leaveWithoutSaving} type="button">
+            Leave without saving
+          </button>
+        </div>
+      </div>
+    ) : null
 
   return (
     <div className="customer-stack">
@@ -420,11 +693,12 @@ export function CustomerComposer({
         {saveState === 'stale' ? (
           <p className="customer-notice customer-notice--caution">
             This draft was changed in another tab or browser. Reload it to continue — nothing here was overwritten.{' '}
-            <button className="customer-btn" onClick={onBack} type="button">
+            <button className="customer-btn" disabled={leave !== null} onClick={() => requestLeave(onBack, 'status')} type="button">
               Reload from My campaigns
             </button>
           </p>
         ) : null}
+        {leaveQuestion('status')}
         {!canEdit ? <p className="customer-notice customer-notice--caution">New campaigns are paused for this wallet, so this draft is read-only.</p> : null}
         {reopenable ? (
           <p className="customer-notice">
@@ -742,11 +1016,17 @@ export function CustomerComposer({
         {issues !== null && issues.length > 0 ? (
           <p className="customer-field__error">Fix the {issues.length === 1 ? 'item' : `${issues.length} items`} marked above, then review again.</p>
         ) : null}
+        {leaveQuestion('footer')}
         <div className="customer-actions">
-          <button className="customer-btn" onClick={() => void flush().then(onBack)} type="button">
-            Back
+          <button className="customer-btn" disabled={leave !== null} onClick={() => requestLeave(onBack, 'footer')} type="button">
+            {leave?.phase === 'saving' && leave.at === 'footer' ? 'Saving…' : 'Back'}
           </button>
-          <button className="customer-btn customer-btn--primary" disabled={!canEdit || busy !== null || saveState === 'stale'} onClick={() => void handleReview()} type="button">
+          <button
+            className="customer-btn customer-btn--primary"
+            disabled={!canEdit || busy !== null || saveState === 'stale' || saveState === 'gone'}
+            onClick={() => void handleReview()}
+            type="button"
+          >
             {busy === 'review' ? 'Preparing review…' : 'Review setup'}
           </button>
         </div>
