@@ -486,8 +486,16 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
     }
   }
 
-  function expectRevision(setup: RedaxCustomerSetupRecordV1, value: unknown): void {
+  /**
+   * `refusal` is a fixed log word naming the operation's branch, so the server log tells a
+   * revision the page sent stale from a compare-and-set the store refused — both answer
+   * `STALE_REVISION`. Never a value.
+   */
+  function expectRevision(setup: RedaxCustomerSetupRecordV1, value: unknown, refusal?: string): void {
     if (typeof value !== 'number' || value !== setup.revision) {
+      if (refusal !== undefined) {
+        log(refusal)
+      }
       fail(409, 'STALE_REVISION')
     }
   }
@@ -497,9 +505,13 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
     current: { readonly value: RedaxCustomerSetupRecordV1; readonly etag: string },
     patch: Partial<RedaxCustomerSetupRecordV1>,
     now: number,
+    refusal?: string,
   ): Promise<RedaxCustomerSetupRecordV1> {
     const next: RedaxCustomerSetupRecordV1 = { ...current.value, ...patch, revision: current.value.revision + 1, updatedAt: now }
     if (!(await writeOver(PATHS.setup(wallet, current.value.id), next, current.etag))) {
+      if (refusal !== undefined) {
+        log(refusal)
+      }
       fail(409, 'STALE_REVISION')
     }
     return next
@@ -937,7 +949,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         const body = await readRedaxCustomerJsonBody(context.request)
         await requirePermission(session.wallet, 'create')
         const current = await readSetup(session.wallet, setupIdFrom(body.id))
-        expectRevision(current.value, body.expectedRevision)
+        expectRevision(current.value, body.expectedRevision, 'setup.save.stale-revision.app')
         const reopen = body.reopen === true
         const state = current.value.state
         const editable =
@@ -952,7 +964,13 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
           fail(400, 'BAD_REQUEST')
         }
         // `publishedAt` is kept: a reopened plan's files stay public, and that stays on record.
-        const setup = await replaceSetup(session.wallet, current, { draft, state: 'DRAFT', plan: null, planHash: null }, context.now)
+        const setup = await replaceSetup(
+          session.wallet,
+          current,
+          { draft, state: 'DRAFT', plan: null, planHash: null },
+          context.now,
+          'setup.save.stale-revision.cas',
+        )
         return redaxCustomerJson(200, { ok: true, setup })
       },
     },
@@ -973,7 +991,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
         }
         if (entry.kind === 'live') {
           const current = entry
-          expectRevision(current.value, body.expectedRevision)
+          expectRevision(current.value, body.expectedRevision, 'setup.delete.stale-revision.app')
           await refuseUnlessDeletableDraft(session.wallet, current.value)
           const tombstone: RedaxCustomerSetupTombstoneV1 = {
             schema: 'redax.customer.setup-deleted.v1',
@@ -987,6 +1005,7 @@ export function createRedaxCustomerApi(deps: RedaxCustomerApiDeps): (request: Re
           if (!(await writeOver(setupPath, tombstone, current.etag))) {
             entry = await readSetupEntry(session.wallet, setupId)
             if (entry === null || entry.kind !== 'deleted') {
+              log('setup.delete.stale-revision.cas')
               fail(409, 'STALE_REVISION')
             }
           }

@@ -3,17 +3,26 @@
 // EXACT SDK SEMANTICS, NOT A COPY OF THEM. Every primitive maps onto one documented
 // `@vercel/blob` 2.8.1 call, and the options are the point:
 //
-//   read     — `get(path, { access: 'private', storeId, useCache: false })`: served from origin
-//              storage, never from the CDN cache (the SDK adds `cache=0`), so a revoked grant or
-//              a superseded revision cannot be read back as current (overwrites otherwise
-//              propagate in up to 60 s). The SDK applies `useCache: false` to PRIVATE reads
-//              only; public files are content-addressed and never overwritten, so a cached
-//              public read and an origin read return the same bytes.
+//   read     — `get(path, { access: 'private', storeId, useCache: false, headers: { 'accept-encoding':
+//              'identity' } })`: served from origin storage, never from the CDN cache (the SDK
+//              adds `cache=0`), so a revoked grant or a superseded revision cannot be read back as
+//              current (overwrites otherwise propagate in up to 60 s). The SDK applies
+//              `useCache: false` to PRIVATE reads only; public files are content-addressed and
+//              never overwritten, so a cached public read and an origin read return the same bytes.
 //   create   — `put(path, bytes, { allowOverwrite: false, addRandomSuffix: false })`: the store
 //              refuses an existing pathname, which is the single-winner primitive.
 //   replace  — `put(path, bytes, { allowOverwrite: true, ifMatch: etag })`: a real ETag
 //              compare-and-set; a superseded ETag throws `BlobPreconditionFailedError`.
 //   remove   — `del(path, { ifMatch })`.
+//
+// THE READ'S ETAG IS THE WRITE'S PRECONDITION, SO IT MUST BE THE STORED OBJECT'S OWN. The SDK's
+// `fetch` asks for `br, gzip, deflate` by default, and a CDN that compresses a response may hand
+// back a weak (`W/"…"`) or encoding-specific ETag that a compare-and-set never matches (RFC 9110
+// §13.1.1 compares If-Match strongly). A private read therefore asks for the unencoded
+// representation; a response that still arrives encoded yields no validator at all. A
+// conditional write or delete is never sent with a validator that is not one strong entity tag —
+// the SDK drops an empty `ifMatch`, which would turn it into a blind overwrite — and the
+// validator is never edited (no stripped `W/`, no added quotes, no wildcard).
 //
 // EVERY CALL NAMES ITS STORE. `storeId` is passed explicitly on every call, so the private
 // store and the public store can never be swapped by an ambient `BLOB_STORE_ID`. With a store
@@ -57,11 +66,19 @@ export interface RedaxCustomerBlobSdk {
   ): Promise<{ readonly url: string; readonly etag: string; readonly pathname: string }>
   get(
     pathname: string,
-    options: { readonly access: 'private' | 'public'; readonly storeId: string; readonly token?: string; readonly useCache: false },
+    options: {
+      readonly access: 'private' | 'public'
+      readonly storeId: string
+      readonly token?: string
+      readonly useCache: false
+      readonly headers?: Readonly<Record<string, string>>
+    },
   ): Promise<
     | {
         readonly statusCode: 200
         readonly stream: ReadableStream<Uint8Array>
+        /** The response's own headers (the SDK passes them through). */
+        readonly headers?: { get(name: string): string | null }
         readonly blob: { readonly etag: string; readonly contentType: string; readonly size: number }
       }
     | { readonly statusCode: 304 }
@@ -105,6 +122,23 @@ function isNotFound(error: unknown): boolean {
 function unavailable(primitive: string, path: string, cause: string): RedaxCustomerStoreUnavailableError {
   return new RedaxCustomerStoreUnavailableError('storage unavailable', `${primitive}.${redaxCustomerStoreRecordKind(path)}.${cause}`)
 }
+
+/** One strong entity tag (RFC 9110 §8.8.3) of visible ASCII: `"…"`, never `W/"…"`, never `*`. */
+const STRONG_ENTITY_TAG = /^"[\x21\x23-\x7e]{1,256}"$/
+
+/** Why a value cannot be a compare-and-set precondition (a fixed word, safe to log), or `null`. */
+function validatorProblem(etag: unknown): 'missing' | 'weak' | 'invalid' | null {
+  if (typeof etag !== 'string' || etag === '') {
+    return 'missing'
+  }
+  if (etag.startsWith('W/')) {
+    return 'weak'
+  }
+  return STRONG_ENTITY_TAG.test(etag) ? null : 'invalid'
+}
+
+/** A private read asks for the unencoded representation, whose ETag is the stored object's own. */
+const IDENTITY_ENCODING: Readonly<Record<string, string>> = Object.freeze({ 'accept-encoding': 'identity' })
 
 /** The largest object this service ever reads back. Everything it stores is far smaller. */
 const MAX_READ_BYTES = 4 * 1024 * 1024
@@ -165,11 +199,15 @@ async function readLatest(
   access: 'private' | 'public',
   credentials: RedaxCustomerBlobStoreCredentials,
   path: string,
+  diagnose: (event: string) => void = () => undefined,
 ): Promise<RedaxCustomerStoredObject | null> {
   assertRedaxCustomerStorePath(path)
   let result: Awaited<ReturnType<RedaxCustomerBlobSdk['get']>>
   try {
-    result = await sdk.get(path, { access, ...auth(credentials), useCache: false })
+    result = await sdk.get(
+      path,
+      access === 'private' ? { access, ...auth(credentials), useCache: false, headers: IDENTITY_ENCODING } : { access, ...auth(credentials), useCache: false },
+    )
   } catch (error) {
     if (isNotFound(error)) {
       return null
@@ -184,6 +222,13 @@ async function readLatest(
     throw unavailable('read', path, `status${result.statusCode}`)
   }
   const bytes = await readBounded(result.stream)
+  const encoding = (result.headers?.get('content-encoding') ?? '').trim().toLowerCase()
+  if (access === 'private' && encoding !== '' && encoding !== 'identity') {
+    // The bytes arrive decoded and current, but this ETag names the encoded response, not the
+    // stored object: the reading carries no validator, so no compare-and-set can be based on it.
+    diagnose(`blob.read.${redaxCustomerStoreRecordKind(path)}.encoded-response`)
+    return { etag: '', bytes, contentType: result.blob.contentType }
+  }
   return { etag: result.blob.etag, bytes, contentType: result.blob.contentType }
 }
 
@@ -201,13 +246,13 @@ export function createRedaxCustomerBlobPrivateStore(
   /** The read-back after a write the SDK reported as failed; its own failure keeps the write's cause. */
   async function readBack(primitive: string, path: string, cause: string): Promise<RedaxCustomerStoredObject | null> {
     try {
-      return await readLatest(sdk, 'private', credentials, path)
+      return await readLatest(sdk, 'private', credentials, path, diagnose)
     } catch {
       throw unavailable(primitive, path, `${cause}.readback-failed`)
     }
   }
   return {
-    read: (path) => readLatest(sdk, 'private', credentials, path),
+    read: (path) => readLatest(sdk, 'private', credentials, path, diagnose),
     async create(path, bytes, contentType) {
       assertRedaxCustomerStorePath(path)
       try {
@@ -231,6 +276,11 @@ export function createRedaxCustomerBlobPrivateStore(
     },
     async replace(path, bytes, contentType, ifMatch) {
       assertRedaxCustomerStorePath(path)
+      const problem = validatorProblem(ifMatch)
+      if (problem !== null) {
+        // Nothing is sent: without a usable precondition this put would be a blind overwrite.
+        throw unavailable('replace', path, `validator-${problem}`)
+      }
       try {
         const written = await sdk.put(path, toBuffer(bytes), {
           access: 'private',
@@ -247,20 +297,37 @@ export function createRedaxCustomerBlobPrivateStore(
         if (current !== null && bytesEqual(current.bytes, bytes)) {
           return { ok: true, etag: current.etag }
         }
-        if (isPreconditionFailure(error) || current === null || current.etag !== ifMatch) {
-          if (isPreconditionFailure(error) && current !== null && current.etag === ifMatch) {
-            // The provider refused an ETag that a latest read still reports for the same bytes:
-            // nobody else wrote. It is still refused (never a blind overwrite), but the log says
-            // so — the page re-reads and tells this apart from a real edit elsewhere.
-            diagnose(`blob.replace.${redaxCustomerStoreRecordKind(path)}.precondition-etag-unchanged${current.etag.startsWith('W/') ? '.weak-etag' : ''}`)
-          }
+        if (current === null) {
           return { ok: false, code: 'PRECONDITION_FAILED' }
+        }
+        const readProblem = validatorProblem(current.etag)
+        if (readProblem !== null) {
+          // The latest read carries no usable validator, so whether anything changed is unknown.
+          throw unavailable('replace', path, `${cause}.readback-validator-${readProblem}`)
+        }
+        if (current.etag !== ifMatch) {
+          // The stored object moved on: a real conflict, whatever the SDK reported.
+          return { ok: false, code: 'PRECONDITION_FAILED' }
+        }
+        if (isPreconditionFailure(error)) {
+          // The provider refused the very ETag a latest read still reports, and the bytes are not
+          // this request's: nobody is known to have written. That is not a conflict to report as
+          // one — and never a reason to overwrite blindly. The write fails as unavailable; the
+          // page keeps its edits and may retry.
+          diagnose(`blob.replace.${redaxCustomerStoreRecordKind(path)}.precondition-etag-unchanged`)
+          throw unavailable('replace', path, `${cause}.etag-unchanged`)
         }
         throw unavailable('replace', path, cause)
       }
     },
     async remove(path, ifMatch) {
       assertRedaxCustomerStorePath(path)
+      // Unconditional only when the caller asks for it (a session's own sign-out). A conditional
+      // delete never goes out without a usable validator: the SDK would drop it and delete anyway.
+      const problem = ifMatch === undefined ? null : validatorProblem(ifMatch)
+      if (problem !== null) {
+        throw unavailable('remove', path, `validator-${problem}`)
+      }
       try {
         await sdk.del(path, ifMatch === undefined ? auth(credentials) : { ...auth(credentials), ifMatch })
       } catch (error) {

@@ -22,7 +22,9 @@ function describeDeleteFailure(failure: RedaxCustomerApiFailure): string {
     return 'This draft can no longer be deleted: its setup has started or its files were already published. It is kept.'
   }
   if (failure.code === 'STALE_REVISION') {
-    return 'This draft changed somewhere else, so it was not deleted. Reload the list and try again.'
+    // The service could not confirm the draft was still the version this list shows — which is
+    // not proof that anything else edited it.
+    return 'This draft was not deleted: it may have changed since this list was loaded. Reload the list to see its latest version, then try again.'
   }
   if (failure.code === 'NETWORK' || failure.code === 'STORE_UNAVAILABLE' || failure.code === 'INTERNAL' || failure.status >= 500) {
     return 'The deletion could not be confirmed. Reload the list to see whether the draft is still there.'
@@ -55,11 +57,14 @@ export function CustomerCampaignList({
   const [deleting, setDeleting] = useState<string | null>(null)
   const [deleteNotice, setDeleteNotice] = useState<{ readonly id: string | null; readonly message: string } | null>(null)
   const generationRef = useRef(0)
+  // Counts delete answers, so a list read that began before one never clears its notice.
+  const deleteEpochRef = useRef(0)
 
   const loadPage = useCallback(
     async (target: number, append: boolean): Promise<void> => {
       const generation = generationRef.current + 1
       generationRef.current = generation
+      const deleteEpoch = deleteEpochRef.current
       setLoading(true)
       setError(null)
       const result = await api.listSetups(target)
@@ -75,6 +80,11 @@ export function CustomerCampaignList({
       setPage(result.page)
       setHasMore(result.hasMore)
       setTotal(result.total)
+      if (!append && deleteEpochRef.current === deleteEpoch) {
+        // The list now shows the server's truth, which answers a failed delete's "reload": its
+        // notice goes. A confirmed deletion's notice stays.
+        setDeleteNotice((current) => (current !== null && current.id !== null ? null : current))
+      }
       for (const item of result.items) {
         if (item.campaign === null) {
           continue
@@ -116,6 +126,7 @@ export function CustomerCampaignList({
     setDeleting(item.id)
     setDeleteNotice(null)
     const result = await api.deleteSetup(item.id, item.revision)
+    deleteEpochRef.current += 1
     setDeleting(null)
     setConfirming(null)
     if (result.ok || result.code === 'NOT_FOUND') {
@@ -156,8 +167,9 @@ export function CustomerCampaignList({
       {!canCreate ? <p className="customer-muted">New campaigns are paused for this wallet.</p> : null}
       {error !== null ? (
         <p className="customer-notice customer-notice--caution">
-          {error}{' '}
-          <button className="customer-btn" onClick={() => void loadPage(0, false)} type="button">
+          {error}
+          {items.length > 0 ? ' The campaigns below are from an earlier reading and may be out of date.' : ''}{' '}
+          <button className="customer-btn" disabled={loading} onClick={() => void loadPage(0, false)} type="button">
             Retry
           </button>
         </p>
@@ -226,8 +238,9 @@ export function CustomerCampaignList({
               {deleteNotice !== null && deleteNotice.id === item.id ? (
                 <p className="customer-notice customer-notice--caution customer-list__confirm">
                   {deleteNotice.message}{' '}
-                  <button className="customer-btn customer-btn--small" onClick={() => void loadPage(0, false)} type="button">
-                    Reload list
+                  {error !== null ? `The list could not be reloaded: ${error} ` : ''}
+                  <button className="customer-btn customer-btn--small" disabled={loading} onClick={() => void loadPage(0, false)} type="button">
+                    {loading ? 'Reloading…' : 'Reload list'}
                   </button>
                 </p>
               ) : null}
