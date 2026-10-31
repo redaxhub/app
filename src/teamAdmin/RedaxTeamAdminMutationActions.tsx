@@ -135,6 +135,7 @@ import {
 import {
   commitRedaxTeamAdminMutationIntendedLegacyMessage,
   verifyRedaxTeamAdminMutationSignedWire,
+  type RedaxTeamAdminMutationSignedWireRefusalCode,
 } from './redaxTeamAdminMutationSignedWire'
 
 // --- Capability literals -------------------------------------------------------
@@ -168,9 +169,11 @@ const REDAX_TEAM_ADMIN_MUTATION_ACTION_COMMITMENT = 'confirmed' as const
 
 /**
  * WHAT IT COVERS, from this source rather than from memory: every post-init mutation
- * carries EXACTLY ONE signature — the approved Team wallet — and exactly ZERO Team/Admin
- * ComputeBudget instructions, so no priority fee is set by this corridor at all. At the
- * current base rate that is `5000` lamports, and this bound is twice it.
+ * carries EXACTLY ONE signature — the approved Team wallet — and the fixed Team/Admin
+ * mutation ComputeBudget pair from its one policy owner. That is `5000` lamports of base
+ * fee plus a FIXED priority fee of at most `ceil(200000 * 20000 / 1_000_000)` = `4000`
+ * lamports (SETUP_METADATA; `1200` for the other five), so at most `9000` — inside this
+ * bound.
  *
  * IT IS THIS CORRIDOR'S OWN AUTHORITY. The Holder corridor's bound is numerically equal
  * TODAY and is a SEPARATE decision about a different transaction shape; this constant is
@@ -534,6 +537,14 @@ export interface RedaxTeamAdminMutationSubmitResult {
   readonly campaign: string | null
   readonly mutationIdentitySha256Hex: string | null
   readonly busy: boolean
+  /**
+   * WHICH exact-message check refused the wallet's artifact: set only when the
+   * exact-one verifier itself returned `SIGNED_ARTIFACT_REJECTED`, `null` on every other
+   * path. One member of the verifier's closed, value-free refusal family — it names a check,
+   * never a byte, a key, a signature or a wire, so a support reader can tell "the wallet
+   * returned a different message" from "the signature did not verify" without either.
+   */
+  readonly signedArtifactRefusal: RedaxTeamAdminMutationSignedWireRefusalCode | null
 }
 
 /** What one reconcile did. It signs nothing, sends nothing and starts nothing. */
@@ -1228,6 +1239,7 @@ export function RedaxTeamAdminMutationActionsProvider({
       let identityHex: string | null = null
       let campaignAddress: string | null = null
       let operation: RedaxTeamAdminMutationOperation | null = null
+      let signedArtifactRefusal: RedaxTeamAdminMutationSignedWireRefusalCode | null = null
 
       /** The ONLY way out of this function. It always releases the latch. */
       const finish = (
@@ -1251,6 +1263,7 @@ export function RedaxTeamAdminMutationActionsProvider({
           campaign: campaignAddress,
           mutationIdentitySha256Hex: identityHex,
           busy: false,
+          signedArtifactRefusal,
         }
       }
 
@@ -1266,6 +1279,7 @@ export function RedaxTeamAdminMutationActionsProvider({
           campaign: null,
           mutationIdentitySha256Hex: null,
           busy: true,
+          signedArtifactRefusal: null,
         }
       }
 
@@ -1675,11 +1689,13 @@ export function RedaxTeamAdminMutationActionsProvider({
         }
         identityHex = identity.identity.sha256Hex
 
-        // 10/11/12/13/14. EXACTLY ONE legacy Transaction, carrying EXACTLY ONE REDAX
-        //    instruction. NO ComputeBudget instruction: none is authorized for this
-        //    corridor, and adding one would change the message that is about to be
-        //    committed to and signed.
-        const transaction = new Transaction().add(plan.instruction)
+        // 10/11/12/13/14. EXACTLY ONE legacy Transaction, carrying the plan's fixed
+        //    ComputeBudget pair and then EXACTLY ONE REDAX instruction — all of it BEFORE
+        //    the message is committed, so the wallet is asked to sign a transaction that
+        //    is already complete. A wallet that would fill an empty ComputeBudget slot
+        //    finds it occupied; one that would not signs the same bytes. Nothing after the
+        //    wallet returns may add, remove or reorder an instruction.
+        const transaction = new Transaction().add(...plan.computeBudgetInstructions, plan.instruction)
         transaction.feePayer = approvedTeam
 
         // 15. THE GUARDED LATE BLOCKHASH, at a context that may not regress below Phase A.
@@ -2078,7 +2094,10 @@ export function RedaxTeamAdminMutationActionsProvider({
           intendedMessageSha256Hex: committed.commitment.sha256Hex,
         })
         if (!verified.ok) {
-          // ZERO broadcast, the no-broadcast terminal, and the artifact is discarded.
+          // ZERO broadcast, the no-broadcast terminal, and the artifact is discarded. Only
+          // the verifier's own value-free code is kept, so the refusal can say WHICH check
+          // failed; the artifact itself is never kept, logged or returned.
+          signedArtifactRefusal = verified.code
           await resolveNoBroadcast('PRE_RAW_SEND_REFUSED', ['SIGN_ONLY_REFUSAL'])
           return finish(false, 'SIGNED_ARTIFACT_REJECTED')
         }

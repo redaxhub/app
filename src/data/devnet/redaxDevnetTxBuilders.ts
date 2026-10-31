@@ -2,8 +2,8 @@
 //
 // Boundary: this module is a PURE builder. It constructs classic-SPL REDAX
 // `TransactionInstruction`s from already-resolved public keys, derives their PDAs
-// and canonical token accounts, and owns the ONE deterministic Holder Devnet
-// ComputeBudget policy (bottom of this file). It performs NO RPC, builds no
+// and canonical token accounts, and owns the TWO fixed Devnet ComputeBudget policies,
+// Holder and Team/Admin mutation (bottom of this file). It performs NO RPC, builds no
 // `Transaction`, holds no `Connection`, touches no wallet adapter, never signs,
 // never sends, never confirms, and mutates nothing. It imports no React and no
 // Anchor `Program`/provider, adds no package, and invokes none of what it builds.
@@ -857,6 +857,106 @@ export function buildRedaxDevnetComputeBudgetInstructions(): readonly [
     ComputeBudgetProgram.setComputeUnitLimit({ units: REDAX_DEVNET_COMPUTE_UNIT_LIMIT }),
     ComputeBudgetProgram.setComputeUnitPrice({
       microLamports: REDAX_DEVNET_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+    }),
+  ]
+}
+
+// =============================================================================
+// The Team/Admin post-init MUTATION Devnet ComputeBudget policy — a SEPARATE table
+// =============================================================================
+//
+// WHY THIS EXISTS. A post-init mutation transaction used
+// to be committed UNSIGNED, with its ComputeBudget slot UNOCCUPIED and far below the
+// packet size — exactly the three conditions under which a documented browser-wallet
+// signing behaviour (Phantom's priority-fee enhancement) adds compute-unit
+// instructions before it signs. The bytes that came back could then no longer equal
+// the bytes REDAX had committed to, and the exact-message verifier refused them —
+// correctly, and before anything was sent. The S1 corridor never meets this: its
+// transaction already carries the output-mint partial signature when the wallet sees
+// it. The Holder corridor already occupies the slot with the policy above.
+//
+// THE REPAIR IS THE HOLDER ONE: occupy the slot BEFORE the message is committed, never
+// tolerate a difference after it. Only the SHAPE is shared. This is a separate policy
+// with its own literals for a different transaction family — Team/Admin does not
+// consume the Holder pair above, and neither policy can change the other.
+//
+// FIXED LITERALS, KEYED BY THE CLOSED SIX. A caller names an operation, never a
+// number: one limit per operation, one price for all six. No fee query, no oracle, no
+// simulation and no fallback price — a fixed policy is the only one whose bytes are
+// knowable before the wallet is asked.
+//
+// MEASURED, NOT GUESSED. Every limit is at least three times the largest
+// consumption observed for its operation:
+//   * LiteSVM, the local program build and the pinned Metaplex fixture —
+//     add_token_config 11,958–14,958 CU; setup_metadata 52,344–58,221;
+//     activate 4,029; pause 6,228; unpause 4,031; finalize 4,035.
+//   * A no-send Devnet simulation against the deployed program and the deployed
+//     Metaplex program — add_token_config 11,904; setup_metadata 45,945–51,653, and
+//     the SAME metadata instruction FAILS under a 40,000 limit. A limit here is never
+//     tightened by guess.
+// SETUP_METADATA keeps exactly the 200,000-unit envelope a one-instruction transaction
+// receives today without any ComputeBudget instruction, so the Metaplex CPI's budget
+// does not change at all.
+//
+// THE FEE STAYS INSIDE THE EXISTING MUTATION PREFLIGHT ALLOWANCE. One signature (5,000
+// lamports at the base rate) plus `ceil(limit * price / 1_000_000)` is 6,200 lamports
+// for each 60,000-unit operation and 9,000 for SETUP_METADATA — both inside the
+// mutation SOL preflight's 10,000-lamport fee allowance, which therefore does not move.
+//
+// BOUNDED TO DEVNET. It is not a Mainnet fee architecture and not a wallet-brand
+// exception: nothing here knows or asks which wallet is connected. The S1 corridor is
+// untouched.
+
+/** The six post-init mutations this policy prices, and nothing else. */
+export type RedaxTeamAdminMutationComputeBudgetOperation =
+  | 'ADD_TOKEN_CONFIG'
+  | 'SETUP_METADATA'
+  | 'ACTIVATE_CAMPAIGN'
+  | 'PAUSE_CAMPAIGN'
+  | 'UNPAUSE_CAMPAIGN'
+  | 'FINALIZE_CAMPAIGN'
+
+/** The selected compute-unit limit for each post-init mutation. Frozen literals. */
+export const REDAX_TEAM_ADMIN_MUTATION_COMPUTE_UNIT_LIMITS: Readonly<
+  Record<RedaxTeamAdminMutationComputeBudgetOperation, number>
+> = Object.freeze({
+  ADD_TOKEN_CONFIG: 60000,
+  SETUP_METADATA: 200000,
+  ACTIVATE_CAMPAIGN: 60000,
+  PAUSE_CAMPAIGN: 60000,
+  UNPAUSE_CAMPAIGN: 60000,
+  FINALIZE_CAMPAIGN: 60000,
+})
+
+/** The selected priority price for all six, in micro-lamports per compute unit. */
+export const REDAX_TEAM_ADMIN_MUTATION_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 20000
+
+/**
+ * The exact ComputeBudget pair one post-init mutation transaction carries, in the exact
+ * canonical order: the limit first, then the price. Both precede the REDAX instruction.
+ *
+ * PURE. It reads no environment or runtime configuration, performs no RPC, touches no
+ * wallet, creates no `Transaction`, signs nothing and sends nothing, and it returns FRESH
+ * instruction objects on every call with identical bytes. An operation outside the closed
+ * six — including an inherited property name — has no limit, and THROWS rather than
+ * defaulting; the one consumer, the pure mutation plan, turns that into a refusal.
+ */
+export function buildRedaxTeamAdminMutationComputeBudgetInstructions(
+  operation: RedaxTeamAdminMutationComputeBudgetOperation,
+): readonly [TransactionInstruction, TransactionInstruction] {
+  const units = Object.prototype.hasOwnProperty.call(
+    REDAX_TEAM_ADMIN_MUTATION_COMPUTE_UNIT_LIMITS,
+    operation,
+  )
+    ? REDAX_TEAM_ADMIN_MUTATION_COMPUTE_UNIT_LIMITS[operation]
+    : undefined
+  if (typeof units !== 'number') {
+    throw new RangeError('REDAX_TEAM_ADMIN_MUTATION_COMPUTE_BUDGET_OPERATION_UNKNOWN')
+  }
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units }),
+    ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: REDAX_TEAM_ADMIN_MUTATION_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
     }),
   ]
 }

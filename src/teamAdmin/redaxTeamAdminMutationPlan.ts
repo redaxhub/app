@@ -11,13 +11,25 @@
 // may act on it owns every irreversible step.
 //
 // -----------------------------------------------------------------------------
-// EXACTLY ONE REDAX INSTRUCTION, AND ZERO ComputeBudget INSTRUCTIONS
+// EXACTLY ONE REDAX INSTRUCTION, PRECEDED BY THE FIXED ComputeBudget PAIR
 // -----------------------------------------------------------------------------
-// Every one of the six assembles to a SINGLE REDAX program instruction today, and
-// `CURRENT_COMPUTE_BUDGET_INSTRUCTIONS = 0`: no ComputeBudget prefix is authorized for
-// the mutation corridor, so this module builds none and imports nothing that could.
-// `app/src/data/devnet/redaxDevnetTxBuilders.ts` owns the Holder ComputeBudget policy and
-// is deliberately consulted for the six instruction builders ONLY.
+// Every one of the six assembles to a SINGLE REDAX program instruction, and
+// `CURRENT_COMPUTE_BUDGET_INSTRUCTIONS = 2`: the plan also carries the fixed Team/Admin
+// mutation ComputeBudget pair — limit, then price — that the one transaction places
+// BEFORE the REDAX instruction. The pair is there because an unsigned transaction with an
+// empty ComputeBudget slot is one a documented wallet behaviour rewrites before signing,
+// and the exact-message verifier then refuses it.
+//
+// THE PAIR IS CONSUMED, NEVER CHOSEN. `app/src/data/devnet/redaxDevnetTxBuilders.ts` owns
+// it as a fixed table keyed by the operation; this module names the operation it already
+// planned and receives fixed bytes. It is NOT the Holder pair, and it constructs nothing
+// itself.
+//
+// THE VERIFIER DID NOT CHANGE, AND THAT IS THE POINT. The exact-one signed wire verifier
+// deliberately carries NO top-level instruction-cardinality check
+// (`SIGNED_WIRE_VERIFIER_TOP_LEVEL_INSTRUCTION_CARDINALITY_CHECK = NONE`), so the pair
+// changes what this module assembles — and therefore what is committed BEFORE the wallet
+// is asked — without weakening the verifier in any way.
 //
 // -----------------------------------------------------------------------------
 // THE SIGNER TOPOLOGY IS COLLAPSED HERE, BEFORE ANY WALLET EXISTS
@@ -48,6 +60,7 @@ import {
   buildAddTokenConfigInstruction,
   buildFinalizeCampaignInstruction,
   buildPauseCampaignInstruction,
+  buildRedaxTeamAdminMutationComputeBudgetInstructions,
   buildSetupMetadataInstruction,
   buildUnpauseCampaignInstruction,
   type RedaxSignerRequirement,
@@ -142,10 +155,16 @@ export interface RedaxTeamAdminMutationPlanV1 {
   readonly topology: RedaxTeamAdminMutationTopologyV1
   /** The ONE REDAX program instruction. No `Transaction` is built here. */
   readonly instruction: TransactionInstruction
-  /** `1` today, asserted rather than assumed, and proven by the structural tests. */
+  /**
+   * The fixed Team/Admin mutation ComputeBudget pair for THIS operation — limit, then
+   * price — which the one transaction places BEFORE `instruction`. Fresh objects from
+   * the one policy owner; never chosen here and never the Holder pair.
+   */
+  readonly computeBudgetInstructions: readonly [TransactionInstruction, TransactionInstruction]
+  /** `1`, asserted rather than assumed, and proven by the structural tests. */
   readonly redaxInstructionCount: 1
-  /** `0` today. No ComputeBudget prefix is authorized for the mutation corridor. */
-  readonly computeBudgetInstructionCount: 0
+  /** `2`: exactly the fixed pair above, and no other ComputeBudget instruction. */
+  readonly computeBudgetInstructionCount: 2
   readonly expectedPreState: RedaxTeamAdminMutationExpectedPreStateV1
   readonly expectedImmediatePostState: RedaxTeamAdminMutationExpectedPostStateV1
 }
@@ -272,6 +291,23 @@ function collapsesToApprovedTeam(
     }
   }
   return true
+}
+
+/**
+ * The fixed ComputeBudget pair for one already-admitted operation, or `null`.
+ *
+ * TOTAL: the policy owner throws for a name outside its closed table, and a throw here would
+ * be this module's only one. A plan that cannot carry its pair is a plan that cannot be
+ * built, so the caller refuses it as `BUILD_FAILED` — never a plan without the pair.
+ */
+function computeBudgetFor(
+  operation: RedaxTeamAdminMutationOperation,
+): readonly [TransactionInstruction, TransactionInstruction] | null {
+  try {
+    return buildRedaxTeamAdminMutationComputeBudgetInstructions(operation)
+  } catch {
+    return null
+  }
 }
 
 function topologyOf(
@@ -413,6 +449,10 @@ export function planRedaxTeamAdminMutation(
       if (!collapsesToApprovedTeam(built.signers, approved)) {
         return { ok: false, code: 'SIGNER_TOPOLOGY_NOT_COLLAPSED' }
       }
+      const computeBudget = computeBudgetFor('ADD_TOKEN_CONFIG')
+      if (computeBudget === null) {
+        return { ok: false, code: 'BUILD_FAILED' }
+      }
 
       return {
         ok: true,
@@ -433,8 +473,9 @@ export function planRedaxTeamAdminMutation(
           }),
           topology: topologyOf(built.signers, approved),
           instruction: built.instruction,
+          computeBudgetInstructions: computeBudget,
           redaxInstructionCount: 1 as const,
-          computeBudgetInstructionCount: 0 as const,
+          computeBudgetInstructionCount: 2 as const,
           expectedPreState: Object.freeze({
             campaignStatusOneOf: Object.freeze(['initialized'] as const),
             metadataSetup: null,
@@ -516,6 +557,10 @@ export function planRedaxTeamAdminMutation(
       if (!collapsesToApprovedTeam(built.signers, approved)) {
         return { ok: false, code: 'SIGNER_TOPOLOGY_NOT_COLLAPSED' }
       }
+      const computeBudget = computeBudgetFor('SETUP_METADATA')
+      if (computeBudget === null) {
+        return { ok: false, code: 'BUILD_FAILED' }
+      }
 
       return {
         ok: true,
@@ -534,8 +579,9 @@ export function planRedaxTeamAdminMutation(
           witness: Object.freeze({ kind: 'METADATA' as const, address: metadataAccount }),
           topology: topologyOf(built.signers, approved),
           instruction: built.instruction,
+          computeBudgetInstructions: computeBudget,
           redaxInstructionCount: 1 as const,
-          computeBudgetInstructionCount: 0 as const,
+          computeBudgetInstructionCount: 2 as const,
           expectedPreState: Object.freeze({
             campaignStatusOneOf: Object.freeze(['initialized'] as const),
             metadataSetup: false,
@@ -633,6 +679,10 @@ export function planRedaxTeamAdminMutation(
       if (!collapsesToApprovedTeam(built.signers, approved)) {
         return { ok: false, code: 'SIGNER_TOPOLOGY_NOT_COLLAPSED' }
       }
+      const computeBudget = computeBudgetFor(request.operation)
+      if (computeBudget === null) {
+        return { ok: false, code: 'BUILD_FAILED' }
+      }
 
       const identityRequest: RedaxTeamAdminMutationIdentityRequest =
         request.operation === 'PAUSE_CAMPAIGN'
@@ -658,8 +708,9 @@ export function planRedaxTeamAdminMutation(
           witness: Object.freeze({ kind: 'NONE' as const }),
           topology: topologyOf(built.signers, approved),
           instruction: built.instruction,
+          computeBudgetInstructions: computeBudget,
           redaxInstructionCount: 1 as const,
-          computeBudgetInstructionCount: 0 as const,
+          computeBudgetInstructionCount: 2 as const,
           expectedPreState: Object.freeze({
             campaignStatusOneOf: admissible,
             metadataSetup: request.operation === 'ACTIVATE_CAMPAIGN' ? true : null,

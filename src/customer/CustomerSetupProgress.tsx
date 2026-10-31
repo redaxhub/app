@@ -71,6 +71,33 @@ interface Outcome {
 // failure, and as support-only on its explicit support code; every other post-send answer —
 // whatever the root's internal reason — is "sent, waiting", offering only Check status.
 
+// WHICH exact-message check refused a wallet's artifact. The generic sentence
+// alone could not tell "the wallet returned a different transaction" from "its signature did
+// not verify". The code names a check from the verifier's closed, value-free family — never a
+// byte, a key, a signature or a wire — and nothing is suggested beyond what it means.
+function signedArtifactDetail(code: RedaxTeamAdminMutationSubmitResult['signedArtifactRefusal']): string {
+  // `== null` on purpose: a result built without the field reads as "no detail", not as a code.
+  if (code == null) {
+    return ''
+  }
+  switch (code) {
+    case 'MESSAGE_BYTE_LENGTH_MISMATCH':
+    case 'MESSAGE_DIGEST_MISMATCH':
+    case 'MESSAGE_BYTES_MISMATCH':
+    case 'MESSAGE_STRUCTURE_MISMATCH':
+    case 'MESSAGE_VERSIONED':
+    case 'REQUIRED_SIGNATURES_NOT_ONE':
+    case 'TEAM_WALLET_SLOT_MISMATCH':
+    case 'SIGNATURE_COUNT_NOT_ONE':
+      return ` The wallet signed a different transaction from the one REDAX prepared (check: ${code}).`
+    case 'TEAM_SIGNATURE_PLACEHOLDER':
+    case 'TEAM_SIGNATURE_INVALID':
+      return ` The wallet's signature did not verify for the prepared transaction (check: ${code}).`
+    default:
+      return ` The wallet's answer could not be checked (check: ${code}).`
+  }
+}
+
 function notSentOutcome(code: string, technical: string, gateMessage: string | null): Outcome {
   switch (code) {
     case 'WALLET_SIGN_ONLY_REFUSED':
@@ -382,7 +409,7 @@ export function CustomerSetupProgress({
           disarmRef.current = null
         }
       }
-      const technical = describeRedaxTeamAdminMutationSubmitCode(result.code)
+      const technical = describeRedaxTeamAdminMutationSubmitCode(result.code) + signedArtifactDetail(result.signedArtifactRefusal)
       if (isRedaxTeamAdminVerifiedResolutionCode(result.code)) {
         setOutcome({ tone: 'positive', title: success, technical })
       } else if (result.rawBroadcastCount === 1 && result.code === 'FINALIZED_LANDED_FAILURE_RESOLVED') {
